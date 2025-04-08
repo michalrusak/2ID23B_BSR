@@ -1,0 +1,12 @@
+@import "styles";
+
+.home {
+  @extend .flex-center;
+  flex-direction: column;
+  text-align: center;
+  min-height: 100vh;
+}
+
+.home-text {
+  width: 60%;
+}

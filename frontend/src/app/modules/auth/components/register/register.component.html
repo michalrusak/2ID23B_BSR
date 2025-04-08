@@ -1,0 +1,31 @@
+<div class="register-container">
+  <form class="form" [formGroup]="form" (ngSubmit)="onSubmit()">
+    <h2>Register</h2>
+
+    <mat-form-field class="input" appearance="fill">
+      <mat-label>Username</mat-label>
+      <input autocomplete="username" type="text" matInput formControlName="username">
+      <mat-error *ngIf="controls.username.invalid">
+        {{getErrorMessage(controls.username)}}
+      </mat-error>
+    </mat-form-field>
+
+    <mat-form-field class="input" appearance="fill">
+      <mat-label>Password</mat-label>
+      <input autocomplete="new-password" type="password" matInput formControlName="password">
+      <mat-error *ngIf="controls.password.invalid">
+        {{getErrorMessage(controls.password)}}
+      </mat-error>
+    </mat-form-field>
+
+
+    <button [disabled]="form.invalid" type="submit" mat-raised-button color="primary">
+      Register
+    </button>
+
+    <p class="question">Already have an account?</p>
+    <button type="button" routerLink="/{{RouterEnum.login}}" mat-raised-button color="primary">
+      Login
+    </button>
+  </form>
+</div>

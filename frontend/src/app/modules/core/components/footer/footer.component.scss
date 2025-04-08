@@ -1,0 +1,6 @@
+@import "styles";
+
+.footer {
+  @extend .flex-center;
+  min-height: 20vh;
+}

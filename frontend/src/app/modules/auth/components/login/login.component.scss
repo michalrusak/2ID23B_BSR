@@ -1,0 +1,23 @@
+@import "styles";
+
+.login-container {
+  @extend .center-page;
+}
+
+.form {
+  @extend .form;
+}
+
+.input {
+  @extend .input;
+}
+
+.question {
+  @extend .question;
+}
+
+@media (orientation: portrait) and (max-width: map-get($grid-breakpoints, md)) {
+  .form {
+    width: 100%;
+  }
+}

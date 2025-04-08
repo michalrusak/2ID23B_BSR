@@ -1,0 +1,15 @@
+<div class="photo-list">
+  <h2>Blockchain Photos</h2>
+
+  <div class="photo-grid">
+    <ng-container *ngIf="photos$ | async as photos">
+      <div class="photo-item" *ngFor="let photo of photos">
+        <img [src]="photo.url" [alt]="photo.title">
+        <div class="photo-info">
+          <p>Block: {{photo.blockIndex}}</p>
+          <p>Timestamp: {{photo.timestamp | date:'short'}}</p>
+        </div>
+      </div>
+    </ng-container>
+  </div>
+</div>

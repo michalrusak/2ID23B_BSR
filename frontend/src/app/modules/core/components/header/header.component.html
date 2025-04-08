@@ -1,0 +1,21 @@
+<mat-toolbar color="primary" class="header">
+
+  <nav>
+    <div class="left">
+      <button mat-button routerLink="{{RouterEnum.home}}">Photo App</button>
+
+
+      <button *ngIf="user$ | async as user" mat-button [matMenuTriggerFor]="menu">{{user}}</button>
+      <mat-menu #menu="matMenu">
+        <button *ngIf="user$ | async" mat-menu-item routerLink="{{RouterEnum.home}}">Option</button>
+      </mat-menu>
+    </div>
+
+    <div class="right">
+      <button *ngIf="!(user$ | async)" mat-button routerLink="{{RouterEnum.login}}">Login</button>
+      <button *ngIf="!(user$ | async)" mat-button routerLink="{{RouterEnum.register}}">Register</button>
+      <button *ngIf="user$ | async" mat-button (click)="logout()">Logout</button>
+    </div>
+  </nav>
+
+</mat-toolbar>
