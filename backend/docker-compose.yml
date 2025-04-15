@@ -29,6 +29,7 @@ services:
       - SECRET_KEY=${SECRET_KEY}
     ports:
       - "5001:5001"
+      - "6001:6001"
     depends_on:
       postgres:
         condition: service_healthy
@@ -57,6 +58,7 @@ services:
       - SECRET_KEY=${SECRET_KEY}
     ports:
       - "5002:5002"
+      - "6002:6002"
     depends_on:
       postgres:
         condition: service_healthy
@@ -85,6 +87,7 @@ services:
       - SECRET_KEY=${SECRET_KEY}
     ports:
       - "5003:5003"
+      - "6003:6003"
     depends_on:
       postgres:
         condition: service_healthy
@@ -113,6 +116,7 @@ services:
       - SECRET_KEY=${SECRET_KEY}
     ports:
       - "5004:5004"
+      - "6004:6004"
     depends_on:
       postgres:
         condition: service_healthy
@@ -141,6 +145,7 @@ services:
       - SECRET_KEY=${SECRET_KEY}
     ports:
       - "5005:5005"
+      - "6005:6005"
     depends_on:
       postgres:
         condition: service_healthy
@@ -169,6 +174,7 @@ services:
       - SECRET_KEY=${SECRET_KEY}
     ports:
       - "5006:5006"
+      - "6006:6006"
     depends_on:
       postgres:
         condition: service_healthy

@@ -1,5 +1,5 @@
-import { Component, OnDestroy } from '@angular/core';
-import { Subject, takeUntil } from 'rxjs';
+import { Component, OnInit, OnDestroy } from '@angular/core';
+import { Subject, takeUntil, interval } from 'rxjs';
 import { PhotoService } from 'src/app/modules/core/services/photo.service';
 import { PhotoStateService } from 'src/app/modules/core/services/photo.state';
 import { HttpClient } from '@angular/common/http';
@@ -9,7 +9,7 @@ import { HttpClient } from '@angular/common/http';
   templateUrl: './add-photo.component.html',
   styleUrls: ['./add-photo.component.scss'],
 })
-export class AddPhotoComponent implements OnDestroy {
+export class AddPhotoComponent implements OnInit, OnDestroy {
   private destroy$ = new Subject<void>();
   state$ = this.photoState.getState();
   chain: any[] = [];
@@ -28,6 +28,25 @@ export class AddPhotoComponent implements OnDestroy {
     private photoState: PhotoStateService,
     private http: HttpClient
   ) {}
+
+  ngOnInit() {
+    this.fetchChain();
+    
+    // Set up periodic refresh of chain
+    interval(10000) // Refresh every 10 seconds
+      .pipe(takeUntil(this.destroy$))
+      .subscribe(() => this.fetchChain());
+      
+    // Subscribe to node status changes
+    this.photoService.nodeStatus$
+      .pipe(takeUntil(this.destroy$))
+      .subscribe(nodeStatus => {
+        this.nodes = this.nodes.map(node => ({
+          ...node,
+          active: nodeStatus[node.id] || false
+        }));
+      });
+  }
 
   onFileSelected(event: any) {
     const file = event.target.files?.[0];
@@ -66,44 +85,64 @@ export class AddPhotoComponent implements OnDestroy {
     return validTypes.includes(file.type) && file.size <= maxSize;
   }
 
-  ngOnInit() {
-    this.fetchChain();
-  }
-
   fetchChain() {
-    this.http
-      .get<any>('http://localhost:5001/blockchain/chain')
+    // Try to get chain from the first active node
+    const activeNode = this.nodes.find(node => node.active)?.id || 1;
+    
+    this.photoService.getChain(activeNode)
       .pipe(takeUntil(this.destroy$))
-      .subscribe((data) => {
-        this.chain = data.chain;
+      .subscribe({
+        next: (data) => {
+          this.chain = data.chain;
+        },
+        error: (err) => {
+          console.error('Failed to fetch chain:', err);
+        }
       });
   }
 
   toggleNode(nodeId: number) {
-    this.http
-      .post(`http://localhost:500${nodeId}/blockchain/simulate/failure`, {
-        type: 'node_down',
-      })
-      .subscribe(() => {
-        const node = this.nodes.find((n) => n.id === nodeId);
-        if (node) node.active = false;
+    const node = this.nodes.find(n => n.id === nodeId);
+    if (!node) return;
+    
+    this.photoService.toggleNode(nodeId, !node.active)
+      .subscribe({
+        next: () => {
+          // Status update is handled by the service
+          this.fetchChain();
+        },
+        error: (err) => {
+          console.error(`Failed to toggle node ${nodeId}:`, err);
+        }
       });
   }
 
   simulateHashCorruption(nodeId: number) {
-    this.http
-      .post(`http://localhost:500${nodeId}/blockchain/simulate/failure`, {
-        type: 'hash_corruption',
-      })
-      .subscribe();
+    this.photoService.simulateHashCorruption(nodeId)
+      .subscribe({
+        next: () => {
+          console.log(`Hash corruption simulated on node ${nodeId}`);
+          // Wait a bit then fetch the chain to see the effect
+          setTimeout(() => this.fetchChain(), 2000);
+        },
+        error: (err) => {
+          console.error(`Failed to simulate hash corruption on node ${nodeId}:`, err);
+        }
+      });
   }
 
   simulateDataCorruption(nodeId: number) {
-    this.http
-      .post(`http://localhost:500${nodeId}/blockchain/simulate/failure`, {
-        type: 'data_corruption',
-      })
-      .subscribe();
+    this.photoService.simulateDataCorruption(nodeId)
+      .subscribe({
+        next: () => {
+          console.log(`Data corruption simulated on node ${nodeId}`);
+          // Wait a bit then fetch the chain to see the effect
+          setTimeout(() => this.fetchChain(), 2000);
+        },
+        error: (err) => {
+          console.error(`Failed to simulate data corruption on node ${nodeId}:`, err);
+        }
+      });
   }
 
   ngOnDestroy() {

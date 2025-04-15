@@ -1,17 +1,20 @@
-import os
-import random
-from flask import Flask, jsonify, request
-import hashlib
-import time
+from flask import Flask, jsonify, request, Blueprint
 import json
-import requests
+import time
+import hashlib
 import zlib
-import base64
+import threading
+import os
+import requests
+import random
+import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Callable, List, Dict, Any, Set
+import socket
+import struct
 from PIL import Image
 import io
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import logging
+from base64 import b64encode, b64decode
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -57,38 +60,46 @@ class Transaction:
         if self.type == "image":
             # Ensure data is in bytes format for images
             if not isinstance(self.data, bytes):
-                # If corrupted to string, convert back to bytes
-                data_bytes = self.data.encode('utf-8')
+                data_repr = "Data not in bytes format"
             else:
-                data_bytes = self.data
+                # Convert binary data to base64 string for JSON serialization
+                data_repr = b64encode(self.data).decode('utf-8')
+
             return {
                 "type": self.type,
-                "data": base64.b64encode(data_bytes).decode('utf-8'),
+                "data": data_repr,
                 "timestamp": self.timestamp,
                 "crc": self.crc,
                 "confirmations": list(self.confirmations)
             }
-        return {
-            "type": self.type,
-            "data": self.data,
-            "timestamp": self.timestamp,
-            "crc": self.crc,
-            "confirmations": list(self.confirmations)
-        }
+        else:
+            return {
+                "type": self.type,
+                "data": self.data,
+                "timestamp": self.timestamp,
+                "crc": self.crc,
+                "confirmations": list(self.confirmations)
+            }
 
     @staticmethod
     def from_dict(data_dict):
-        """Create transaction from dictionary with proper data type handling"""
-        if data_dict["type"] == "image":
-            data = base64.b64decode(data_dict["data"])
-        else:
-            data = data_dict["data"]
+        """Create transaction from dictionary"""
+        tx_type = data_dict.get('type', 'generic')
+        data = data_dict.get('data')
         
-        transaction = Transaction(data, data_dict["type"])
-        transaction.timestamp = data_dict["timestamp"]
-        transaction.crc = data_dict["crc"]
-        transaction.confirmations = set(data_dict["confirmations"])
-        return transaction
+        # Handle image data conversion from base64 back to bytes
+        if tx_type == "image" and isinstance(data, str):
+            try:
+                data = b64decode(data)
+            except Exception as e:
+                logger.error(f"Error decoding image data: {e}")
+        
+        tx = Transaction(data, tx_type)
+        tx.timestamp = data_dict.get('timestamp', time.time())
+        tx.crc = data_dict.get('crc', tx.crc)
+        tx.confirmations = set(data_dict.get('confirmations', []))
+        return tx
+
 class Block:
     def __init__(self, index, previous_hash, transactions, timestamp=None):
         self.node_id = os.getenv('NODE_ID', 'unknown')
@@ -104,6 +115,7 @@ class Block:
         )
 
     def calculate_hash(self):
+        """Calculate block hash"""
         block_string = json.dumps({
             'index': self.index,
             'previous_hash': self.previous_hash,
@@ -116,31 +128,1403 @@ class Block:
         return new_hash
 
     def mine_block(self, difficulty):
-        logger.info(f"czy tu jestem start minig") 
+        """Mine block with proof of work"""
+        logger.info(f"Starting block mining with difficulty {difficulty}")
         target = '0' * difficulty
-        logger.info(
-            f"Starting mining block {self.index} - Target difficulty: {difficulty}",
-            extra={'node_id': self.node_id}
-        )
-        iterations = 0
+        
         while self.hash[:difficulty] != target:
             self.nonce += 1
+            if self.nonce % 10000 == 0:
+                logger.info(f"Mining in progress... nonce: {self.nonce}, current hash: {self.hash[:10]}...")
             self.hash = self.calculate_hash()
-            iterations += 1
-            if iterations % 1000 == 0:  # Log progress every 1000 iterations
-                logger.info(
-                    f"Mining progress - Block: {self.index}, Nonce: {self.nonce}, Current Hash: {self.hash}",
-                    extra={'node_id': self.node_id}
-                )
         
+        logger.info(f"Block mined! Nonce: {self.nonce}, Hash: {self.hash}")
+        return True
+
+
+class P2PNode:
+    def __init__(self, host: str, port: int, node_id: str, blockchain=None):
+        self.host = host
+        self.port = port
+        self.node_id = node_id
+        self.peers: Dict[str, Dict[str, Any]] = {}  # {peer_id: {host, port, last_seen}}
+        self.server_socket = None
+        self.is_running = False
+        self.blockchain = blockchain
+        self.message_handlers = {}
+        self.discovered_peers: Set[str] = set()
+        self.lock = threading.Lock()
+        
+    def start(self):
+        """Start the P2P server"""
+        # Start the server in a separate thread
+        self.is_running = True
+        server_thread = threading.Thread(target=self.run_server)
+        server_thread.daemon = True
+        server_thread.start()
+        
+        # Start peer discovery and heartbeat in separate threads
+        discovery_thread = threading.Thread(target=self.discover_peers_periodically)
+        discovery_thread.daemon = True
+        discovery_thread.start()
+        
+        heartbeat_thread = threading.Thread(target=self.send_heartbeats)
+        heartbeat_thread.daemon = True
+        heartbeat_thread.start()
+        
+        logger.info(f"P2P node started on {self.host}:{self.port} with ID {self.node_id}")
+        
+    def run_server(self):
+        """Run the P2P server socket"""
+        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.server_socket.bind((self.host, self.port))
+        self.server_socket.listen(10)
+        
+        logger.info(f"P2P server listening on {self.host}:{self.port}")
+        
+        while self.is_running:
+            try:
+                client_sock, address = self.server_socket.accept()
+                client_thread = threading.Thread(target=self.handle_connection, args=(client_sock, address))
+                client_thread.daemon = True
+                client_thread.start()
+            except Exception as e:
+                if self.is_running:  # Only log if still supposed to be running
+                    logger.error(f"Error accepting connection: {e}")
+    
+    def stop(self):
+        """Stop the P2P server"""
+        self.is_running = False
+        if self.server_socket:
+            self.server_socket.close()
+        logger.info("P2P server stopped")
+    
+    def handle_connection(self, client_socket, address):
+        """Handle incoming P2P connections"""
+        try:
+            # Read message length first (4 bytes)
+            length_bytes = client_socket.recv(4)
+            if not length_bytes:
+                return
+                
+            message_length = struct.unpack('!I', length_bytes)[0]
+            
+            # Read the actual message
+            chunks = []
+            bytes_received = 0
+            while bytes_received < message_length:
+                chunk = client_socket.recv(min(message_length - bytes_received, 4096))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                bytes_received += len(chunk)
+                
+            data = b''.join(chunks)
+            if not data:
+                return
+                
+            message = json.loads(data.decode('utf-8'))
+            
+            # Process the message
+            self.process_message(message, client_socket)
+            
+        except Exception as e:
+            logger.error(f"Error handling connection from {address}: {e}")
+        finally:
+            client_socket.close()
+    
+    def process_message(self, message, client_socket=None):
+        """Process incoming messages"""
+        if 'type' not in message:
+            logger.error("Received message without type field")
+            return
+            
+        message_type = message['type']
+        logger.info(f"Received message of type: {message_type}")
+        
+        if message_type in self.message_handlers:
+            try:
+                self.message_handlers[message_type](message, client_socket)
+            except Exception as e:
+                logger.error(f"Error processing {message_type} message: {e}")
+        else:
+            logger.warning(f"No handler for message type: {message_type}")
+    
+    def register_handler(self, message_type: str, handler_func: Callable):
+        """Register a handler for a specific message type"""
+        self.message_handlers[message_type] = handler_func
+        logger.info(f"Registered handler for message type: {message_type}")
+    
+    def connect_to_peer(self, host: str, port: int) -> bool:
+        """Connect to a peer node"""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(10)
+            sock.connect((host, port))
+            
+            # Send introduction message
+            intro_message = {
+                "type": "introduction",
+                "node_id": self.node_id,
+                "host": self.host,
+                "port": self.port
+            }
+            self.send_message(intro_message, sock)
+            
+            # Close the socket (peer will connect back if needed)
+            sock.close()
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to connect to peer {host}:{port}: {e}")
+            return False
+    
+    def send_message(self, message: Dict[str, Any], sock=None, peer_id=None):
+        """Send a message to a peer"""
+        if not sock and not peer_id:
+            logger.error("Either socket or peer_id must be provided")
+            return False
+            
+        try:
+            # Convert message to JSON string and then to bytes
+            message_bytes = json.dumps(message).encode('utf-8')
+            
+            # Prepare message with length prefix
+            message_length = struct.pack('!I', len(message_bytes))
+            
+            # Use provided socket or get one for the peer
+            if not sock:
+                if peer_id not in self.peers:
+                    logger.error(f"Unknown peer: {peer_id}")
+                    return False
+                    
+                peer = self.peers[peer_id]
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(10)
+                sock.connect((peer['host'], peer['port']))
+                need_to_close = True
+            else:
+                need_to_close = False
+                
+            # Send length prefix followed by message
+            sock.sendall(message_length + message_bytes)
+            
+            if need_to_close:
+                sock.close()
+                
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error sending message: {e}")
+            return False
+    
+    def broadcast_message(self, message: Dict[str, Any]):
+        """Broadcast a message to all peers"""
+        logger.info(f"Broadcasting message of type: {message.get('type', 'unknown')}")
+        
+        with self.lock:
+            peers_copy = list(self.peers.items())
+        
+        success_count = 0
+        for peer_id, peer_info in peers_copy:
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(5)
+                sock.connect((peer_info['host'], peer_info['port']))
+                if self.send_message(message, sock):
+                    success_count += 1
+                sock.close()
+            except Exception as e:
+                logger.error(f"Failed to broadcast to peer {peer_id}: {e}")
+                # Mark peer as potentially disconnected
+                with self.lock:
+                    if peer_id in self.peers:
+                        self.peers[peer_id]['last_seen'] = time.time() - 3600  # 1 hour ago
+        
+        return success_count
+    
+    def discover_peers_periodically(self):
+        """Periodically discover new peers"""
+        while self.is_running:
+            self.discover_peers()
+            time.sleep(60)  # Discover every minute
+    
+    def discover_peers(self):
+        """Discover peers through known peers"""
+        logger.info("Starting peer discovery")
+        
+        with self.lock:
+            peers_copy = list(self.peers.items())
+        
+        for peer_id, peer_info in peers_copy:
+            try:
+                # Ask for peers from this peer
+                message = {
+                    "type": "get_peers",
+                    "node_id": self.node_id
+                }
+                
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(5)
+                sock.connect((peer_info['host'], peer_info['port']))
+                self.send_message(message, sock)
+                sock.close()
+                
+            except Exception as e:
+                logger.error(f"Failed to get peers from {peer_id}: {e}")
+    
+    def register_peer(self, peer_id: str, host: str, port: int):
+        """Register a new peer"""
+        if peer_id == self.node_id:
+            return  # Don't add ourselves
+            
+        with self.lock:
+            if peer_id not in self.peers:
+                self.peers[peer_id] = {
+                    'host': host,
+                    'port': port,
+                    'last_seen': time.time()
+                }
+                logger.info(f"Registered new peer: {peer_id} at {host}:{port}")
+            else:
+                # Update existing peer
+                self.peers[peer_id]['host'] = host
+                self.peers[peer_id]['port'] = port
+                self.peers[peer_id]['last_seen'] = time.time()
+    
+    def send_heartbeats(self):
+        """Send heartbeats to all peers periodically"""
+        while self.is_running:
+            logger.debug("Sending heartbeats to peers")
+            
+            with self.lock:
+                peers_copy = list(self.peers.items())
+            
+            # Remove inactive peers (not seen in the last 10 minutes)
+            current_time = time.time()
+            inactive_peers = []
+            
+            for peer_id, peer_info in peers_copy:
+                if current_time - peer_info['last_seen'] > 600:  # 10 minutes
+                    inactive_peers.append(peer_id)
+                    continue
+                    
+                # Send heartbeat
+                try:
+                    message = {
+                        "type": "heartbeat",
+                        "node_id": self.node_id,
+                        "timestamp": current_time
+                    }
+                    
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.settimeout(5)
+                    sock.connect((peer_info['host'], peer_info['port']))
+                    self.send_message(message, sock)
+                    sock.close()
+                    
+                except Exception as e:
+                    logger.warning(f"Failed to send heartbeat to peer {peer_id}: {e}")
+                    # If failed multiple times, mark for removal
+                    if current_time - peer_info['last_seen'] > 300:  # 5 minutes
+                        inactive_peers.append(peer_id)
+            
+            # Remove inactive peers
+            with self.lock:
+                for peer_id in inactive_peers:
+                    if peer_id in self.peers:
+                        del self.peers[peer_id]
+                        logger.info(f"Removed inactive peer: {peer_id}")
+            
+            time.sleep(30)  # Send heartbeats every 30 seconds
+
+
+class BlockchainNode:
+    def __init__(self, node_id, start_port=5001, num_nodes=6, difficulty=2):
+        """Initialize a blockchain node with P2P networking capabilities"""
+        self.node_id = node_id
+        self.nodes = generate_node_addresses(start_port, num_nodes)
+        self.difficulty = difficulty
+        self.chain = []
+        self.pending_transactions = []
+        self.lock = threading.Lock()
+        self.mining_thread = None
+        self.is_mining = False
+        
+        # Create genesis block
+        genesis_tx = Transaction("Genesis Block", "genesis")
+        genesis_block = Block(0, "0", [genesis_tx])
+        self.chain.append(genesis_block)
+        
+        logger.info(f"Initialized blockchain node {node_id} with difficulty {difficulty}")
+        logger.info(f"Genesis block created with hash: {genesis_block.hash}")
+        
+        # Initialize P2P networking
+        self.p2p_port = 6000 + int(node_id.replace('node', ''))  # Calculate P2P port
+        self.p2p_node = P2PNode(
+            host='0.0.0.0',  # Listen on all interfaces 
+            port=self.p2p_port,
+            node_id=node_id,
+            blockchain=self
+        )
+        
+        # Register message handlers
+        self.register_p2p_handlers()
+        
+        # Start P2P node
+        self.p2p_node.start()
+        
+        # Connect to seed nodes (first few nodes) for bootstrap
+        self.connect_to_seed_nodes()
+        
+        # Start periodically verifying blockchain data
+        self.start_data_verification()
+
+    def connect_to_seed_nodes(self):
+        """Connect to a few seed nodes to bootstrap the P2P network"""
+        # Use the first few nodes as seed nodes
+        node_num = int(self.node_id.replace('node', ''))
+        seed_count = min(3, node_num - 1) if node_num > 1 else 0
+        
+        for i in range(1, seed_count + 1):
+            if f"node{i}" != self.node_id:  # Don't connect to self
+                seed_host = f"node{i}"  # Docker service name or localhost
+                seed_port = 6000 + i     # P2P port
+                
+                # Start connection in a separate thread
+                threading.Thread(
+                    target=self.p2p_node.connect_to_peer,
+                    args=(seed_host, seed_port),
+                    daemon=True
+                ).start()
+                
+                logger.info(f"Connecting to seed node {seed_host}:{seed_port}")
+    
+    def register_p2p_handlers(self):
+        """Register all P2P message handlers"""
+        # Basic network handlers
+        self.p2p_node.register_handler("introduction", self.handle_introduction)
+        self.p2p_node.register_handler("heartbeat", self.handle_heartbeat)
+        self.p2p_node.register_handler("get_peers", self.handle_get_peers)
+        self.p2p_node.register_handler("peers_list", self.handle_peers_list)
+        
+        # Blockchain specific handlers
+        self.p2p_node.register_handler("new_transaction", self.handle_new_transaction)
+        self.p2p_node.register_handler("new_block", self.handle_new_block)
+        self.p2p_node.register_handler("get_chain", self.handle_get_chain)
+        self.p2p_node.register_handler("chain_response", self.handle_chain_response)
+        self.p2p_node.register_handler("verify_transaction", self.handle_verify_transaction)
+    
+    def handle_introduction(self, message, sock):
+        """Handle introduction messages from peers"""
+        peer_id = message.get('node_id')
+        host = message.get('host')
+        port = message.get('port')
+        
+        if peer_id and host and port:
+            self.p2p_node.register_peer(peer_id, host, port)
+            
+            # Send back our own information
+            if sock:
+                response = {
+                    "type": "introduction",
+                    "node_id": self.node_id,
+                    "host": self.p2p_node.host,
+                    "port": self.p2p_node.port
+                }
+                self.p2p_node.send_message(response, sock)
+                
+                # Also send our peer list
+                peers_response = {
+                    "type": "peers_list",
+                    "peers": [
+                        {"node_id": pid, "host": pinfo["host"], "port": pinfo["port"]}
+                        for pid, pinfo in self.p2p_node.peers.items()
+                    ]
+                }
+                self.p2p_node.send_message(peers_response, sock)
+    
+    def handle_heartbeat(self, message, sock):
+        """Handle heartbeat messages from peers"""
+        peer_id = message.get('node_id')
+        
+        if peer_id in self.p2p_node.peers:
+            with self.p2p_node.lock:
+                self.p2p_node.peers[peer_id]['last_seen'] = time.time()
+            
+            # Respond to heartbeat with our own
+            if sock:
+                response = {
+                    "type": "heartbeat",
+                    "node_id": self.node_id,
+                    "timestamp": time.time()
+                }
+                self.p2p_node.send_message(response, sock)
+    
+    def handle_get_peers(self, message, sock):
+        """Handle requests for peer lists"""
+        if not sock:
+            return
+            
+        peer_id = message.get('node_id')
+        if peer_id:
+            # Update last seen time if we know this peer
+            if peer_id in self.p2p_node.peers:
+                with self.p2p_node.lock:
+                    self.p2p_node.peers[peer_id]['last_seen'] = time.time()
+                
+            # Send back our peer list
+            with self.p2p_node.lock:
+                peers_copy = list(self.p2p_node.peers.items())
+                
+            response = {
+                "type": "peers_list",
+                "peers": [
+                    {"node_id": pid, "host": pinfo["host"], "port": pinfo["port"]}
+                    for pid, pinfo in peers_copy
+                ]
+            }
+            self.p2p_node.send_message(response, sock)
+    
+    def handle_peers_list(self, message, sock):
+        """Handle received peer lists"""
+        peers = message.get('peers', [])
+        
+        for peer in peers:
+            peer_id = peer.get('node_id')
+            host = peer.get('host')
+            port = peer.get('port')
+            
+            if peer_id and host and port and peer_id != self.node_id:
+                with self.p2p_node.lock:
+                    if peer_id not in self.p2p_node.peers and peer_id not in self.p2p_node.discovered_peers:
+                        self.p2p_node.discovered_peers.add(peer_id)
+                        
+                        # Try to connect to this new peer
+                        threading.Thread(
+                            target=self.p2p_node.connect_to_peer,
+                            args=(host, port),
+                            daemon=True
+                        ).start()
+    
+    def handle_new_transaction(self, message, sock):
+        """Handle new transaction broadcast from peers"""
+        transaction_data = message.get('transaction')
+        if not transaction_data:
+            logger.warning("Received new_transaction message without transaction data")
+            return
+            
+        try:
+            # Create transaction from data
+            transaction = Transaction.from_dict(transaction_data)
+            
+            # Verify the transaction
+            if transaction.verify_crc():
+                # Add sender to confirmations
+                sender_id = message.get('node_id')
+                node_num = int(sender_id.replace('node', ''))
+                port = f"500{node_num}"
+                if sender_id:
+                    transaction.confirmations.add(f"http://{sender_id}:{port}")
+                    
+                # Add our own confirmation
+                node_num = int(self.node_id.replace('node', ''))
+                port = f"500{node_num}"
+                transaction.confirmations.add(f"http://{self.node_id}:{port}")
+                
+                # Add to pending pool if not already there
+                self.add_transaction(transaction)
+                
+                # Send confirmation back
+                if sock:
+                    response = {
+                        "type": "transaction_verified",
+                        "node_id": self.node_id,
+                        "transaction_crc": transaction.crc,
+                        "result": True
+                    }
+                    self.p2p_node.send_message(response, sock)
+                
+                # Forward to other peers (if we're not the originator)
+                if message.get('originator') != self.node_id:
+                    # Mark ourselves as having seen this message
+                    forward_message = {
+                        "type": "new_transaction",
+                        "transaction": transaction_data,
+                        "node_id": self.node_id,
+                        "originator": message.get('originator', message.get('node_id')),
+                        "timestamp": time.time()
+                    }
+                    
+                    # Forward to a subset of peers to avoid flooding
+                    with self.p2p_node.lock:
+                        peers_copy = list(self.p2p_node.peers.items())
+                        
+                    # Forward to at most 3 random peers
+                    if len(peers_copy) > 3:
+                        peers_copy = random.sample(peers_copy, 3)
+                        
+                    for peer_id, peer_info in peers_copy:
+                        if peer_id != message.get('node_id'):  # Don't send back to sender
+                            try:
+                                self.p2p_node.send_message(forward_message, peer_id=peer_id)
+                            except Exception as e:
+                                logger.error(f"Failed to forward transaction to {peer_id}: {e}")
+                    
+            else:
+                # Transaction failed verification
+                logger.warning(f"Received invalid transaction with CRC: {transaction.crc}")
+                if sock:
+                    response = {
+                        "type": "transaction_verified",
+                        "node_id": self.node_id,
+                        "transaction_crc": transaction.crc,
+                        "result": False
+                    }
+                    self.p2p_node.send_message(response, sock)
+                    
+        except Exception as e:
+            logger.error(f"Error handling new transaction: {e}")
+            if sock:
+                response = {
+                    "type": "transaction_verified",
+                    "node_id": self.node_id,
+                    "result": False,
+                    "error": str(e)
+                }
+                self.p2p_node.send_message(response, sock)
+    
+    def handle_new_block(self, message, sock):
+        """Handle new block broadcast from peers"""
+        block_data = message.get('block')
+        if not block_data:
+            logger.warning("Received new_block message without block data")
+            return
+            
+        try:
+            # Reconstruct transactions
+            transactions = []
+            for tx_data in block_data['transactions']:
+                transaction = Transaction.from_dict(tx_data)
+                transactions.append(transaction)
+                
+            # Create block
+            block = Block(
+                block_data['index'],
+                block_data['previous_hash'],
+                transactions,
+                block_data['timestamp']
+            )
+            block.nonce = block_data['nonce']
+            block.hash = block_data['hash']
+            
+            # Verify block
+            if self.verify_block(block):
+                # Add to blockchain
+                with self.lock:
+                    # Check if we already have this block
+                    if len(self.chain) > block.index and self.chain[block.index].hash == block.hash:
+                        logger.info(f"Block {block.index} already exists in the chain")
+                    elif len(self.chain) == block.index:
+                        # This is the next block we need
+                        self.chain.append(block)
+                        logger.info(f"Added new block {block.index} to the chain")
+                        
+                        # Remove transactions that are now in the blockchain
+                        self.pending_transactions = [
+                            tx for tx in self.pending_transactions
+                            if not any(tx.crc == chain_tx.crc for chain_tx in block.transactions)
+                        ]
+                        
+                        # Send confirmation
+                        if sock:
+                            response = {
+                                "type": "block_verified",
+                                "node_id": self.node_id,
+                                "block_index": block.index,
+                                "block_hash": block.hash,
+                                "result": True
+                            }
+                            self.p2p_node.send_message(response, sock)
+                        
+                        # Forward the block to other peers
+                        if message.get('originator') != self.node_id:
+                            forward_message = {
+                                "type": "new_block",
+                                "block": block_data,
+                                "node_id": self.node_id,
+                                "originator": message.get('originator', message.get('node_id')),
+                                "timestamp": time.time()
+                            }
+                            self.p2p_node.broadcast_message(forward_message)
+                    else:
+                        # We might be behind in the chain
+                        logger.warning(f"Received block {block.index} but current chain length is {len(self.chain)}")
+                        
+                        # Request full chain from sender
+                        if sock:
+                            response = {
+                                "type": "get_chain",
+                                "node_id": self.node_id
+                            }
+                            self.p2p_node.send_message(response, sock)
+            else:
+                # Block failed verification
+                logger.warning(f"Received invalid block with hash: {block.hash}")
+                if sock:
+                    response = {
+                        "type": "block_verified",
+                        "node_id": self.node_id,
+                        "block_index": block.index,
+                        "block_hash": block.hash,
+                        "result": False
+                    }
+                    self.p2p_node.send_message(response, sock)
+                    
+        except Exception as e:
+            logger.error(f"Error handling new block: {e}")
+            if sock:
+                response = {
+                    "type": "block_verified",
+                    "node_id": self.node_id,
+                    "result": False,
+                    "error": str(e)
+                }
+                self.p2p_node.send_message(response, sock)
+    
+    def handle_get_chain(self, message, sock):
+        """Handle requests for the blockchain"""
+        if not sock:
+            return
+            
+        try:
+            # Prepare chain data
+            chain_data = []
+            with self.lock:
+                for block in self.chain:
+                    block_data = {
+                        'index': block.index,
+                        'previous_hash': block.previous_hash,
+                        'timestamp': block.timestamp,
+                        'transactions': [t.to_dict() for t in block.transactions],
+                        'hash': block.hash,
+                        'nonce': block.nonce
+                    }
+                    chain_data.append(block_data)
+                    
+            response = {
+                "type": "chain_response",
+                "node_id": self.node_id,
+                "chain": chain_data,
+                "pending_transactions": [t.to_dict() for t in self.pending_transactions]
+            }
+            
+            self.p2p_node.send_message(response, sock)
+            
+        except Exception as e:
+            logger.error(f"Error handling get_chain request: {e}")
+    
+    def handle_chain_response(self, message, sock):
+        """Handle blockchain data received from peers"""
+        chain_data = message.get('chain')
+        pending_transactions = message.get('pending_transactions', [])
+        
+        if not chain_data:
+            logger.warning("Received chain_response without chain data")
+            return
+            
+        try:
+            # Reconstruct the chain
+            new_chain = []
+            for block_data in chain_data:
+                transactions = []
+                for tx_data in block_data['transactions']:
+                    transaction = Transaction.from_dict(tx_data)
+                    transactions.append(transaction)
+                    
+                block = Block(
+                    block_data['index'],
+                    block_data['previous_hash'],
+                    transactions,
+                    block_data['timestamp']
+                )
+                block.nonce = block_data['nonce']
+                block.hash = block_data['hash']
+                new_chain.append(block)
+                
+            # Verify the chain
+            if self.is_chain_valid(new_chain):
+                # Check if the chain is longer than ours
+                with self.lock:
+                    if len(new_chain) > len(self.chain):
+                        self.chain = new_chain
+                        logger.info(f"Updated chain from peer, new length: {len(new_chain)}")
+                        
+                        # Update pending transactions - add ones we don't have
+                        existing_txs = {tx.crc for tx in self.pending_transactions}
+                        for tx_data in pending_transactions:
+                            if tx_data['crc'] not in existing_txs:
+                                try:
+                                    tx = Transaction.from_dict(tx_data)
+                                    if tx.verify_crc():
+                                        self.pending_transactions.append(tx)
+                                except Exception as e:
+                                    logger.error(f"Error adding pending transaction: {e}")
+            else:
+                logger.warning("Received invalid chain from peer")
+                
+        except Exception as e:
+            logger.error(f"Error handling chain response: {e}")
+    
+    def handle_verify_transaction(self, message, sock):
+        """Handle transaction verification requests"""
+        transaction_data = message.get('transaction')
+        if not transaction_data or not sock:
+            return
+            
+        try:
+            transaction = Transaction.from_dict(transaction_data)
+            verification_result = transaction.verify_crc()
+            
+            response = {
+                "type": "transaction_verified",
+                "node_id": self.node_id,
+                "transaction_crc": transaction.crc,
+                "result": verification_result
+            }
+            
+            self.p2p_node.send_message(response, sock)
+            
+            if verification_result:
+                # Add sender to confirmations
+                sender_id = message.get('node_id')
+                node_num = int(sender_id.replace('node', ''))
+                port = f"500{node_num}"
+                if sender_id:
+                    transaction.confirmations.add(f"http://{sender_id}:{port}")
+                    
+                # Add our own confirmation
+                node_num = int(self.node_id.replace('node', ''))
+                port = f"500{node_num}"
+                transaction.confirmations.add(f"http://{self.node_id}:{port}")
+                
+                # Add to pending pool if not already there
+                self.add_transaction(transaction)
+                
+        except Exception as e:
+            logger.error(f"Error verifying transaction: {e}")
+            response = {
+                "type": "transaction_verified",
+                "node_id": self.node_id,
+                "result": False,
+                "error": str(e)
+            }
+            self.p2p_node.send_message(response, sock)
+
+    def add_transaction(self, transaction):
+        """Add a transaction to the pending pool"""
+        with self.lock:
+            # Check if transaction already exists
+            for tx in self.pending_transactions:
+                if tx.crc == transaction.crc:
+                    # Update confirmations
+                    tx.confirmations.update(transaction.confirmations)
+                    logger.info(f"Updated existing transaction {transaction.crc} with new confirmations")
+                    return
+                    
+            # Add new transaction
+            self.pending_transactions.append(transaction)
+            logger.info(f"Added new transaction {transaction.crc} to pending pool")
+        
+    def mine_block(self):
+        """Mine a new block with pending transactions"""
+        if self.is_mining:
+            logger.warning("Already mining a block")
+            return None
+            
+        with self.lock:
+            if not self.pending_transactions:
+                logger.info("No pending transactions to mine")
+                return None
+                
+            # Select transactions for the new block
+            current_transactions = self.pending_transactions[:10]  # Limit block size
+            previous_hash = self.chain[-1].hash
+            new_index = len(self.chain)
+        
+        # Create new block
+        new_block = Block(new_index, previous_hash, current_transactions)
+        
+        # Start mining in a separate thread
+        def mine_thread():
+            self.is_mining = True
+            try:
+                new_block.mine_block(self.difficulty)
+                
+                with self.lock:
+                    # Check if the chain was modified during mining
+                    if len(self.chain) == new_index and self.chain[-1].hash == previous_hash:
+                        self.chain.append(new_block)
+                        
+                        # Remove mined transactions from pending pool
+                        self.pending_transactions = [
+                            tx for tx in self.pending_transactions
+                            if tx not in current_transactions
+                        ]
+                        
+                        logger.info(f"Mined new block {new_index} with {len(current_transactions)} transactions")
+                        
+                        # Broadcast the block to the network
+                        self.broadcast_mined_block(new_block)
+                        return new_block
+                    else:
+                        logger.warning("Chain was modified during mining, discarding block")
+                        return None
+                        
+            except Exception as e:
+                logger.error(f"Error mining block: {e}")
+                return None
+            finally:
+                self.is_mining = False
+        
+        self.mining_thread = threading.Thread(target=mine_thread)
+        self.mining_thread.daemon = True
+        self.mining_thread.start()
+        
+        return "Mining started"
+    
+    def broadcast_transaction(self, transaction):
+        """Broadcast transaction using P2P network"""
+        logger.info("Broadcasting transaction via P2P")
+        
+        # Add our confirmation
+        node_num = int(self.node_id.replace('node', ''))
+        port = f"500{node_num}"
+        transaction.confirmations.add(f"http://{self.node_id}:{port}")
+        
+        # Broadcast via P2P
+        message = {
+            "type": "new_transaction",
+            "transaction": transaction.to_dict(),
+            "node_id": self.node_id,
+            "originator": self.node_id,
+            "timestamp": time.time()
+        }
+        
+        self.p2p_node.broadcast_message(message)
+        
+        # Wait a bit for confirmations
+        time.sleep(2)
+        
+        required_confirmations = (len(self.nodes) + 1) // 2
+        logger.info(f"Confirmations: {len(transaction.confirmations)} / {len(self.nodes) + 1} required: {required_confirmations}")
+        return len(transaction.confirmations) >= required_confirmations
+    
+    def broadcast_mined_block(self, block):
+        """Broadcast mined block using P2P network"""
+        logger.info(f"Broadcasting mined block {block.index} via P2P")
+        
+        block_data = {
+            'index': block.index,
+            'previous_hash': block.previous_hash,
+            'timestamp': block.timestamp,
+            'transactions': [t.to_dict() for t in block.transactions],
+            'hash': block.hash,
+            'nonce': block.nonce
+        }
+        
+        message = {
+            "type": "new_block",
+            "block": block_data,
+            "node_id": self.node_id,
+            "originator": self.node_id,
+            "timestamp": time.time()
+        }
+        
+        # Broadcast via P2P
+        success_count = self.p2p_node.broadcast_message(message)
+        
+        # Wait a bit for confirmations
+        time.sleep(2)
+        
+        required_confirmations = (len(self.nodes) + 1) // 2
+        return success_count >= required_confirmations
+    
+    def verify_block(self, block):
+        """Verify a block's hash and position in the chain"""
+        # Verify block hash
+        computed_hash = block.calculate_hash()
+        if computed_hash != block.hash:
+            logger.warning(f"Block {block.index} has invalid hash")
+            return False
+            
+        # Check difficulty (Proof of Work)
+        if block.hash[:self.difficulty] != '0' * self.difficulty:
+            logger.warning(f"Block {block.index} doesn't meet difficulty requirement")
+            return False
+            
+        # Verify block position and previous hash
+        if block.index == 0:
+            # Genesis block
+            return True
+            
+        with self.lock:
+            if block.index > len(self.chain):
+                logger.warning(f"Block index {block.index} is too high for current chain")
+                return False
+                
+            if block.index > 0 and block.previous_hash != self.chain[block.index-1].hash:
+                logger.warning(f"Block {block.index} has invalid previous_hash")
+                return False
+                
+        # Verify all transactions in the block
+        for tx in block.transactions:
+            if not tx.verify_crc():
+                logger.warning(f"Transaction {tx.crc} in block {block.index} is invalid")
+                return False
+                
+        return True
+    
+    def is_chain_valid(self, chain):
+        """Verify the entire blockchain"""
+        # Check if the chain is empty
+        if not chain:
+            return False
+            
+        # Verify each block
+        for i in range(len(chain)):
+            block = chain[i]
+            
+            # Verify block hash
+            if block.hash != block.calculate_hash():
+                logger.warning(f"Block {i} has invalid hash")
+                return False
+                
+            # Verify proof of work
+            if block.hash[:self.difficulty] != '# filepath: d:\Pliki\studia\psk\semestr_3\bsr\2ID23B_BSR\backend\blockchain_node.py':
+                logger.warning(f"Block {i} doesn't meet difficulty requirement")
+                return False
+
+class Transaction:
+    def __init__(self, data, transaction_type="generic"):
+        self.data = data
+        self.timestamp = time.time()
+        self.type = transaction_type
+        self.crc = self.calculate_crc()
+        self.confirmations = set()
+        # Log transaction creation with CRC
         logger.info(
-            f"Successfully mined block {self.index} - Final Hash: {self.hash}, Nonce: {self.nonce}",
+            f"Created new transaction - Type: {transaction_type}, CRC: {self.crc}",
+            extra={'node_id': os.getenv('NODE_ID', 'unknown')}
+        )
+
+    def calculate_crc(self):
+        """Calculate CRC32 checksum for data verification"""
+        if isinstance(self.data, bytes):
+            crc = format(zlib.crc32(self.data) & 0xFFFFFFFF, '08x')
+        else:
+            crc = format(zlib.crc32(str(self.data).encode()) & 0xFFFFFFFF, '08x')
+        logger.info(
+            f"Calculated CRC: {crc} for data type: {type(self.data)}",
+            extra={'node_id': os.getenv('NODE_ID', 'unknown')}
+        )
+        return crc
+
+    def verify_crc(self):
+        """Verify data integrity using CRC32 checksum"""
+        current_crc = self.calculate_crc()
+        is_valid = self.crc == current_crc
+        logger.info(
+            f"CRC Verification - Stored: {self.crc}, Calculated: {current_crc}, Valid: {is_valid}",
+            extra={'node_id': os.getenv('NODE_ID', 'unknown')}
+        )
+        return is_valid
+
+    def to_dict(self):
+        """Convert transaction to dictionary with proper data type handling"""
+        if self.type == "image":
+            # Ensure data is in bytes format for images
+            if not isinstance(self.data, bytes):
+                data_repr = "Data not in bytes format"
+            else:
+                # Convert binary data to base64 string for JSON serialization
+                data_repr = b64encode(self.data).decode('utf-8')
+
+            return {
+                "type": self.type,
+                "data": data_repr,
+                "timestamp": self.timestamp,
+                "crc": self.crc,
+                "confirmations": list(self.confirmations)
+            }
+        else:
+            return {
+                "type": self.type,
+                "data": self.data,
+                "timestamp": self.timestamp,
+                "crc": self.crc,
+                "confirmations": list(self.confirmations)
+            }
+
+    @staticmethod
+    def from_dict(data_dict):
+        """Create transaction from dictionary"""
+        tx_type = data_dict.get('type', 'generic')
+        data = data_dict.get('data')
+        
+        # Handle image data conversion from base64 back to bytes
+        if tx_type == "image" and isinstance(data, str):
+            try:
+                data = b64decode(data)
+            except Exception as e:
+                logger.error(f"Error decoding image data: {e}")
+        
+        tx = Transaction(data, tx_type)
+        tx.timestamp = data_dict.get('timestamp', time.time())
+        tx.crc = data_dict.get('crc', tx.crc)
+        tx.confirmations = set(data_dict.get('confirmations', []))
+        return tx
+
+class Block:
+    def __init__(self, index, previous_hash, transactions, timestamp=None):
+        self.node_id = os.getenv('NODE_ID', 'unknown')
+        self.index = index
+        self.previous_hash = previous_hash
+        self.transactions = transactions
+        self.timestamp = timestamp or time.time()
+        self.nonce = 0
+        self.hash = self.calculate_hash()
+        logger.info(
+            f"Created new block - Index: {index}, Previous Hash: {previous_hash}, Initial Hash: {self.hash}",
             extra={'node_id': self.node_id}
         )
-        logger.info(f"czy tu jestem end minig") 
 
-def generate_node_addresses(start_port, num_nodes):
-    return [f"http://node{i}:{5000 + i}" for i in range(1, num_nodes + 1)]
+    def calculate_hash(self):
+        """Calculate block hash"""
+        block_string = json.dumps({
+            'index': self.index,
+            'previous_hash': self.previous_hash,
+            'transactions': [t.to_dict() for t in self.transactions],
+            'timestamp': self.timestamp,
+            'nonce': self.nonce
+        }, sort_keys=True).encode()
+        
+        new_hash = hashlib.sha256(block_string).hexdigest()
+        return new_hash
+
+    def mine_block(self, difficulty):
+        """Mine block with proof of work"""
+        logger.info(f"Starting block mining with difficulty {difficulty}")
+        target = '0' * difficulty
+        
+        while self.hash[:difficulty] != target:
+            self.nonce += 1
+            if self.nonce % 10000 == 0:
+                logger.info(f"Mining in progress... nonce: {self.nonce}, current hash: {self.hash[:10]}...")
+            self.hash = self.calculate_hash()
+        
+        logger.info(f"Block mined! Nonce: {self.nonce}, Hash: {self.hash}")
+        return True
+
+
+class P2PNode:
+    def __init__(self, host: str, port: int, node_id: str, blockchain=None):
+        self.host = host
+        self.port = port
+        self.node_id = node_id
+        self.peers: Dict[str, Dict[str, Any]] = {}  # {peer_id: {host, port, last_seen}}
+        self.server_socket = None
+        self.is_running = False
+        self.blockchain = blockchain
+        self.message_handlers = {}
+        self.discovered_peers: Set[str] = set()
+        self.lock = threading.Lock()
+        
+    def start(self):
+        """Start the P2P server"""
+        # Start the server in a separate thread
+        self.is_running = True
+        server_thread = threading.Thread(target=self.run_server)
+        server_thread.daemon = True
+        server_thread.start()
+        
+        # Start peer discovery and heartbeat in separate threads
+        discovery_thread = threading.Thread(target=self.discover_peers_periodically)
+        discovery_thread.daemon = True
+        discovery_thread.start()
+        
+        heartbeat_thread = threading.Thread(target=self.send_heartbeats)
+        heartbeat_thread.daemon = True
+        heartbeat_thread.start()
+        
+        logger.info(f"P2P node started on {self.host}:{self.port} with ID {self.node_id}")
+        
+    def run_server(self):
+        """Run the P2P server socket"""
+        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.server_socket.bind((self.host, self.port))
+        self.server_socket.listen(10)
+        
+        logger.info(f"P2P server listening on {self.host}:{self.port}")
+        
+        while self.is_running:
+            try:
+                client_sock, address = self.server_socket.accept()
+                client_thread = threading.Thread(target=self.handle_connection, args=(client_sock, address))
+                client_thread.daemon = True
+                client_thread.start()
+            except Exception as e:
+                if self.is_running:  # Only log if still supposed to be running
+                    logger.error(f"Error accepting connection: {e}")
+    
+    def stop(self):
+        """Stop the P2P server"""
+        self.is_running = False
+        if self.server_socket:
+            self.server_socket.close()
+        logger.info("P2P server stopped")
+    
+    def handle_connection(self, client_socket, address):
+        """Handle incoming P2P connections"""
+        try:
+            # Read message length first (4 bytes)
+            length_bytes = client_socket.recv(4)
+            if not length_bytes:
+                return
+                
+            message_length = struct.unpack('!I', length_bytes)[0]
+            
+            # Read the actual message
+            chunks = []
+            bytes_received = 0
+            while bytes_received < message_length:
+                chunk = client_socket.recv(min(message_length - bytes_received, 4096))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                bytes_received += len(chunk)
+                
+            data = b''.join(chunks)
+            if not data:
+                return
+                
+            message = json.loads(data.decode('utf-8'))
+            
+            # Process the message
+            self.process_message(message, client_socket)
+            
+        except Exception as e:
+            logger.error(f"Error handling connection from {address}: {e}")
+        finally:
+            client_socket.close()
+    
+    def process_message(self, message, client_socket=None):
+        """Process incoming messages"""
+        if 'type' not in message:
+            logger.error("Received message without type field")
+            return
+            
+        message_type = message['type']
+        logger.info(f"Received message of type: {message_type}")
+        
+        if message_type in self.message_handlers:
+            try:
+                self.message_handlers[message_type](message, client_socket)
+            except Exception as e:
+                logger.error(f"Error processing {message_type} message: {e}")
+        else:
+            logger.warning(f"No handler for message type: {message_type}")
+    
+    def register_handler(self, message_type: str, handler_func: Callable):
+        """Register a handler for a specific message type"""
+        self.message_handlers[message_type] = handler_func
+        logger.info(f"Registered handler for message type: {message_type}")
+    
+    def connect_to_peer(self, host: str, port: int) -> bool:
+        """Connect to a peer node"""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(10)
+            sock.connect((host, port))
+            
+            # Send introduction message
+            intro_message = {
+                "type": "introduction",
+                "node_id": self.node_id,
+                "host": self.host,
+                "port": self.port
+            }
+            self.send_message(intro_message, sock)
+            
+            # Close the socket (peer will connect back if needed)
+            sock.close()
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to connect to peer {host}:{port}: {e}")
+            return False
+    
+    def send_message(self, message: Dict[str, Any], sock=None, peer_id=None):
+        """Send a message to a peer"""
+        if not sock and not peer_id:
+            logger.error("Either socket or peer_id must be provided")
+            return False
+            
+        try:
+            # Convert message to JSON string and then to bytes
+            message_bytes = json.dumps(message).encode('utf-8')
+            
+            # Prepare message with length prefix
+            message_length = struct.pack('!I', len(message_bytes))
+            
+            # Use provided socket or get one for the peer
+            if not sock:
+                if peer_id not in self.peers:
+                    logger.error(f"Unknown peer: {peer_id}")
+                    return False
+                    
+                peer = self.peers[peer_id]
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(10)
+                sock.connect((peer['host'], peer['port']))
+                need_to_close = True
+            else:
+                need_to_close = False
+                
+            # Send length prefix followed by message
+            sock.sendall(message_length + message_bytes)
+            
+            if need_to_close:
+                sock.close()
+                
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error sending message: {e}")
+            return False
+    
+    def broadcast_message(self, message: Dict[str, Any]):
+        """Broadcast a message to all peers"""
+        logger.info(f"Broadcasting message of type: {message.get('type', 'unknown')}")
+        
+        with self.lock:
+            peers_copy = list(self.peers.items())
+        
+        success_count = 0
+        for peer_id, peer_info in peers_copy:
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(5)
+                sock.connect((peer_info['host'], peer_info['port']))
+                if self.send_message(message, sock):
+                    success_count += 1
+                sock.close()
+            except Exception as e:
+                logger.error(f"Failed to broadcast to peer {peer_id}: {e}")
+                # Mark peer as potentially disconnected
+                with self.lock:
+                    if peer_id in self.peers:
+                        self.peers[peer_id]['last_seen'] = time.time() - 3600  # 1 hour ago
+        
+        return success_count
+    
+    def discover_peers_periodically(self):
+        """Periodically discover new peers"""
+        while self.is_running:
+            self.discover_peers()
+            time.sleep(60)  # Discover every minute
+    
+    def discover_peers(self):
+        """Discover peers through known peers"""
+        logger.info("Starting peer discovery")
+        
+        with self.lock:
+            peers_copy = list(self.peers.items())
+        
+        for peer_id, peer_info in peers_copy:
+            try:
+                # Ask for peers from this peer
+                message = {
+                    "type": "get_peers",
+                    "node_id": self.node_id
+                }
+                
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(5)
+                sock.connect((peer_info['host'], peer_info['port']))
+                self.send_message(message, sock)
+                sock.close()
+                
+            except Exception as e:
+                logger.error(f"Failed to get peers from {peer_id}: {e}")
+    
+    def register_peer(self, peer_id: str, host: str, port: int):
+        """Register a new peer"""
+        if peer_id == self.node_id:
+            return  # Don't add ourselves
+            
+        with self.lock:
+            if peer_id not in self.peers:
+                self.peers[peer_id] = {
+                    'host': host,
+                    'port': port,
+                    'last_seen': time.time()
+                }
+                logger.info(f"Registered new peer: {peer_id} at {host}:{port}")
+            else:
+                # Update existing peer
+                self.peers[peer_id]['host'] = host
+                self.peers[peer_id]['port'] = port
+                self.peers[peer_id]['last_seen'] = time.time()
+    
+    def send_heartbeats(self):
+        """Send heartbeats to all peers periodically"""
+        while self.is_running:
+            logger.debug("Sending heartbeats to peers")
+            
+            with self.lock:
+                peers_copy = list(self.peers.items())
+            
+            # Remove inactive peers (not seen in the last 10 minutes)
+            current_time = time.time()
+            inactive_peers = []
+            
+            for peer_id, peer_info in peers_copy:
+                if current_time - peer_info['last_seen'] > 600:  # 10 minutes
+                    inactive_peers.append(peer_id)
+                    continue
+                    
+                # Send heartbeat
+                try:
+                    message = {
+                        "type": "heartbeat",
+                        "node_id": self.node_id,
+                        "timestamp": current_time
+                    }
+                    
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.settimeout(5)
+                    sock.connect((peer_info['host'], peer_info['port']))
+                    self.send_message(message, sock)
+                    sock.close()
+                    
+                except Exception as e:
+                    logger.warning(f"Failed to send heartbeat to peer {peer_id}: {e}")
+                    # If failed multiple times, mark for removal
+                    if current_time - peer_info['last_seen'] > 300:  # 5 minutes
+                        inactive_peers.append(peer_id)
+            
+            # Remove inactive peers
+            with self.lock:
+                for peer_id in inactive_peers:
+                    if peer_id in self.peers:
+                        del self.peers[peer_id]
+                        logger.info(f"Removed inactive peer: {peer_id}")
+            
+            time.sleep(30)  # Send heartbeats every 30 seconds
+
 
 class BlockchainNode:
     def __init__(self, node_id, start_port=5001, num_nodes=6, difficulty=2):
@@ -153,11 +1537,507 @@ class BlockchainNode:
         self.mining_status = {"is_mining": False, "progress": 0}
         self.health_check_interval = 30
         self.failed_nodes = {}
+        
+        # Initialize P2P networking
+        self.p2p_port = 6000 + int(node_id.replace('node', ''))  # Calculate P2P port
+        self.p2p_node = P2PNode(
+            host='0.0.0.0',  # Listen on all interfaces 
+            port=self.p2p_port,
+            node_id=node_id,
+            blockchain=self
+        )
+        
+        # Register message handlers
+        self.register_p2p_handlers()
+        
+        # Start background processes
         self.start_health_check()
-        # Initial synchronization with network
-        self.initial_sync()
         self.start_hash_verification()
         self.start_data_verification()
+        
+        # Start P2P node
+        self.p2p_node.start()
+        
+        # Connect to seed nodes (the first few nodes)
+        self.connect_to_seed_nodes()
+        
+        # Initial synchronization with network
+        self.initial_sync()
+
+    def register_p2p_handlers(self):
+        """Register all P2P message handlers"""
+        # Basic network handlers
+        self.p2p_node.register_handler("introduction", self.handle_introduction)
+        self.p2p_node.register_handler("heartbeat", self.handle_heartbeat)
+        self.p2p_node.register_handler("get_peers", self.handle_get_peers)
+        self.p2p_node.register_handler("peers_list", self.handle_peers_list)
+        
+        # Blockchain specific handlers
+        self.p2p_node.register_handler("new_transaction", self.handle_new_transaction)
+        self.p2p_node.register_handler("new_block", self.handle_new_block)
+        self.p2p_node.register_handler("get_chain", self.handle_get_chain)
+        self.p2p_node.register_handler("chain_response", self.handle_chain_response)
+        self.p2p_node.register_handler("verify_transaction", self.handle_verify_transaction)
+        self.p2p_node.register_handler("transaction_verified", self.handle_transaction_verified)
+        self.p2p_node.register_handler("block_verified", self.handle_block_verified)
+    
+    def connect_to_seed_nodes(self):
+        """Connect to a few seed nodes to bootstrap the P2P network"""
+        # Use the first few nodes as seed nodes
+        node_num = int(self.node_id.replace('node', ''))
+        seed_count = min(3, node_num)
+        logger.info(f"Connecting to seed nodes (up to {seed_count} nodes)")
+        
+        for i in range(1, seed_count + 1):
+            if f"node{i}" != self.node_id:  # Don't connect to self
+                seed_host = f"node{i}"  # Docker service name
+                seed_port = 6000 + i  # P2P port
+                
+                # Start connection in a separate thread
+                threading.Thread(
+                    target=self.p2p_node.connect_to_peer,
+                    args=(seed_host, seed_port),
+                    daemon=True
+                ).start()
+                logger.info(f"Initiated connection to seed node{i} at {seed_host}:{seed_port}")
+    
+    # P2P Message Handlers
+    def handle_introduction(self, message, sock):
+        """Handle introduction messages from peers"""
+        peer_id = message.get('node_id')
+        host = message.get('host')
+        port = message.get('port')
+        
+        if peer_id and host and port:
+            self.p2p_node.register_peer(peer_id, host, port)
+            
+            # Send back our own information
+            if sock:
+                response = {
+                    "type": "introduction",
+                    "node_id": self.node_id,
+                    "host": self.p2p_node.host,
+                    "port": self.p2p_node.port
+                }
+                self.p2p_node.send_message(response, sock)
+                
+                # Also send our peer list
+                peers_response = {
+                    "type": "peers_list",
+                    "peers": [
+                        {"node_id": pid, "host": pinfo["host"], "port": pinfo["port"]}
+                        for pid, pinfo in self.p2p_node.peers.items()
+                    ]
+                }
+                self.p2p_node.send_message(peers_response, sock)
+        else:
+            logger.warning("Received incomplete introduction message")
+    
+    def handle_heartbeat(self, message, sock):
+        """Handle heartbeat messages from peers"""
+        peer_id = message.get('node_id')
+        timestamp = message.get('timestamp')
+        
+        if peer_id in self.p2p_node.peers:
+            with self.p2p_node.lock:
+                self.p2p_node.peers[peer_id]['last_seen'] = time.time()
+            
+            # Respond to heartbeat with our own
+            if sock:
+                response = {
+                    "type": "heartbeat",
+                    "node_id": self.node_id,
+                    "timestamp": time.time()
+                }
+                self.p2p_node.send_message(response, sock)
+        else:
+            # Unknown peer, ask for introduction
+            if sock:
+                response = {
+                    "type": "get_introduction",
+                    "node_id": self.node_id
+                }
+                self.p2p_node.send_message(response, sock)
+    
+    def handle_get_peers(self, message, sock):
+        """Handle requests for peer lists"""
+        if not sock:
+            return
+            
+        peer_id = message.get('node_id')
+        if peer_id:
+            # Update last seen time
+            if peer_id in self.p2p_node.peers:
+                with self.p2p_node.lock:
+                    self.p2p_node.peers[peer_id]['last_seen'] = time.time()
+                
+            # Send back our peer list
+            response = {
+                "type": "peers_list",
+                "peers": [
+                    {"node_id": pid, "host": pinfo["host"], "port": pinfo["port"]}
+                    for pid, pinfo in self.p2p_node.peers.items()
+                ]
+            }
+            self.p2p_node.send_message(response, sock)
+    
+    def handle_peers_list(self, message, sock):
+        """Handle received peer lists"""
+        peers = message.get('peers', [])
+        
+        for peer in peers:
+            peer_id = peer.get('node_id')
+            host = peer.get('host')
+            port = peer.get('port')
+            
+            if peer_id and host and port and peer_id != self.node_id:
+                if peer_id not in self.p2p_node.peers and peer_id not in self.p2p_node.discovered_peers:
+                    self.p2p_node.discovered_peers.add(peer_id)
+                    
+                    # Try to connect to this new peer
+                    threading.Thread(
+                        target=self.p2p_node.connect_to_peer,
+                        args=(host, port),
+                        daemon=True
+                    ).start()
+    
+    def handle_new_transaction(self, message, sock):
+        """Handle new transaction broadcast from peers"""
+        transaction_data = message.get('transaction')
+        if not transaction_data:
+            logger.warning("Received new_transaction message without transaction data")
+            return
+            
+        try:
+            # Create transaction from data
+            transaction = Transaction.from_dict(transaction_data)
+            
+            # Verify the transaction
+            if transaction.verify_crc():
+                # Add sender to confirmations
+                sender_id = message.get('node_id')
+                if sender_id:
+                    transaction.confirmations.add(f"http://{sender_id}:5001")
+                    
+                # Add our own confirmation
+                node_num = int(self.node_id.replace('node', ''))
+                port = f"500{node_num}"
+                transaction.confirmations.add(f"http://{self.node_id}:{port}")
+                
+                # Add to pending pool if not already there
+                self.add_transaction(transaction)
+                
+                # Send confirmation back
+                if sock:
+                    response = {
+                        "type": "transaction_verified",
+                        "node_id": self.node_id,
+                        "transaction_crc": transaction.crc,
+                        "result": True
+                    }
+                    self.p2p_node.send_message(response, sock)
+                
+                # Forward to other peers (if we're not the originator)
+                if message.get('originator') != self.node_id:
+                    # Mark ourselves as having seen this message
+                    forward_message = {
+                        "type": "new_transaction",
+                        "transaction": transaction_data,
+                        "node_id": self.node_id,
+                        "originator": message.get('originator', message.get('node_id')),
+                        "timestamp": time.time()
+                    }
+                    
+                    # Forward to peers
+                    with self.p2p_node.lock:
+                        peers_copy = list(self.p2p_node.peers.items())
+                        
+                    # Forward to at most 3 random peers to avoid flooding
+                    if len(peers_copy) > 3:
+                        peers_copy = random.sample(peers_copy, 3)
+                        
+                    for peer_id, peer_info in peers_copy:
+                        if peer_id != message.get('node_id'):  # Don't send back to sender
+                            try:
+                                self.p2p_node.send_message(forward_message, peer_id=peer_id)
+                            except Exception as e:
+                                logger.error(f"Failed to forward transaction to {peer_id}: {e}")
+                    
+            else:
+                # Transaction failed verification
+                logger.warning(f"Received invalid transaction with CRC: {transaction.crc}")
+                if sock:
+                    response = {
+                        "type": "transaction_verified",
+                        "node_id": self.node_id,
+                        "transaction_crc": transaction.crc,
+                        "result": False
+                    }
+                    self.p2p_node.send_message(response, sock)
+                    
+        except Exception as e:
+            logger.error(f"Error handling new transaction: {e}")
+            if sock:
+                response = {
+                    "type": "transaction_verified",
+                    "node_id": self.node_id,
+                    "result": False,
+                    "error": str(e)
+                }
+                self.p2p_node.send_message(response, sock)
+    
+    def handle_new_block(self, message, sock):
+        """Handle new block broadcast from peers"""
+        block_data = message.get('block')
+        if not block_data:
+            logger.warning("Received new_block message without block data")
+            return
+            
+        try:
+            # Reconstruct transactions
+            transactions = []
+            for tx_data in block_data['transactions']:
+                transaction = Transaction.from_dict(tx_data)
+                transactions.append(transaction)
+                
+            # Create block
+            block = Block(
+                block_data['index'],
+                block_data['previous_hash'],
+                transactions,
+                block_data['timestamp']
+            )
+            block.nonce = block_data['nonce']
+            block.hash = block_data['hash']
+            
+            # Verify block
+            if self.verify_block(block):
+                # Add to blockchain
+                with self.lock:
+                    # Check if we already have this block
+                    if len(self.chain) > block.index and self.chain[block.index].hash == block.hash:
+                        logger.info(f"Block {block.index} already exists in the chain")
+                    elif len(self.chain) == block.index:
+                        # This is the next block we need
+                        self.chain.append(block)
+                        logger.info(f"Added new block {block.index} to the chain")
+                        
+                        # Remove transactions that are now in the blockchain
+                        self.pending_transactions = [
+                            tx for tx in self.pending_transactions
+                            if not any(tx.crc == chain_tx.crc for chain_tx in block.transactions)
+                        ]
+                        
+                        # Send confirmation
+                        if sock:
+                            response = {
+                                "type": "block_verified",
+                                "node_id": self.node_id,
+                                "block_index": block.index,
+                                "block_hash": block.hash,
+                                "result": True
+                            }
+                            self.p2p_node.send_message(response, sock)
+                        
+                        # Forward the block to other peers
+                        if message.get('originator') != self.node_id:
+                            forward_message = {
+                                "type": "new_block",
+                                "block": block_data,
+                                "node_id": self.node_id,
+                                "originator": message.get('originator', message.get('node_id')),
+                                "timestamp": time.time()
+                            }
+                            self.p2p_node.broadcast_message(forward_message)
+                    else:
+                        # We might be behind in the chain
+                        logger.warning(f"Received block {block.index} but current chain length is {len(self.chain)}")
+                        
+                        # Request full chain from sender
+                        if sock:
+                            response = {
+                                "type": "get_chain",
+                                "node_id": self.node_id
+                            }
+                            self.p2p_node.send_message(response, sock)
+            else:
+                # Block failed verification
+                logger.warning(f"Received invalid block with hash: {block.hash}")
+                if sock:
+                    response = {
+                        "type": "block_verified",
+                        "node_id": self.node_id,
+                        "block_index": block.index,
+                        "block_hash": block.hash,
+                        "result": False
+                    }
+                    self.p2p_node.send_message(response, sock)
+                    
+        except Exception as e:
+            logger.error(f"Error handling new block: {e}")
+            if sock:
+                response = {
+                    "type": "block_verified",
+                    "node_id": self.node_id,
+                    "result": False,
+                    "error": str(e)
+                }
+                self.p2p_node.send_message(response, sock)
+    
+    def handle_get_chain(self, message, sock):
+        """Handle requests for the blockchain"""
+        if not sock:
+            return
+            
+        try:
+            # Prepare chain data
+            chain_data = []
+            with self.lock:
+                for block in self.chain:
+                    block_data = {
+                        'index': block.index,
+                        'previous_hash': block.previous_hash,
+                        'timestamp': block.timestamp,
+                        'transactions': [t.to_dict() for t in block.transactions],
+                        'hash': block.hash,
+                        'nonce': block.nonce
+                    }
+                    chain_data.append(block_data)
+                    
+            response = {
+                "type": "chain_response",
+                "node_id": self.node_id,
+                "chain": chain_data,
+                "pending_transactions": [t.to_dict() for t in self.pending_transactions]
+            }
+            
+            self.p2p_node.send_message(response, sock)
+            
+        except Exception as e:
+            logger.error(f"Error handling get_chain request: {e}")
+    
+    def handle_chain_response(self, message, sock):
+        """Handle blockchain data received from peers"""
+        chain_data = message.get('chain')
+        pending_transactions = message.get('pending_transactions', [])
+        
+        if not chain_data:
+            logger.warning("Received chain_response without chain data")
+            return
+            
+        try:
+            # Reconstruct the chain
+            new_chain = []
+            for block_data in chain_data:
+                transactions = []
+                for tx_data in block_data['transactions']:
+                    transaction = Transaction.from_dict(tx_data)
+                    transactions.append(transaction)
+                    
+                block = Block(
+                    block_data['index'],
+                    block_data['previous_hash'],
+                    transactions,
+                    block_data['timestamp']
+                )
+                block.nonce = block_data['nonce']
+                block.hash = block_data['hash']
+                new_chain.append(block)
+                
+            # Verify the chain
+            if self.is_chain_valid(new_chain):
+                # Check if the chain is longer than ours
+                with self.lock:
+                    if len(new_chain) > len(self.chain):
+                        self.chain = new_chain
+                        logger.info(f"Updated chain from peer, new length: {len(new_chain)}")
+                        
+                        # Update pending transactions - add ones we don't have
+                        existing_txs = {tx.crc for tx in self.pending_transactions}
+                        for tx_data in pending_transactions:
+                            if tx_data['crc'] not in existing_txs:
+                                try:
+                                    tx = Transaction.from_dict(tx_data)
+                                    if tx.verify_crc():
+                                        self.pending_transactions.append(tx)
+                                except Exception as e:
+                                    logger.error(f"Error adding pending transaction: {e}")
+            else:
+                logger.warning("Received invalid chain from peer")
+                
+        except Exception as e:
+            logger.error(f"Error handling chain response: {e}")
+    
+    def handle_verify_transaction(self, message, sock):
+        """Handle transaction verification requests"""
+        transaction_data = message.get('transaction')
+        if not transaction_data or not sock:
+            return
+            
+        try:
+            transaction = Transaction.from_dict(transaction_data)
+            verification_result = transaction.verify_crc()
+            
+            response = {
+                "type": "transaction_verified",
+                "node_id": self.node_id,
+                "transaction_crc": transaction.crc,
+                "result": verification_result
+            }
+            
+            self.p2p_node.send_message(response, sock)
+            
+            if verification_result:
+                # Add sender to confirmations
+                sender_id = message.get('node_id')
+                if sender_id:
+                    transaction.confirmations.add(f"http://{sender_id}:5001")
+                    
+                # Add our own confirmation
+                node_num = int(self.node_id.replace('node', ''))
+                port = f"500{node_num}"
+                transaction.confirmations.add(f"http://{self.node_id}:{port}")
+                
+                # Add to pending pool if not already there
+                self.add_transaction(transaction)
+                
+        except Exception as e:
+            logger.error(f"Error verifying transaction: {e}")
+            response = {
+                "type": "transaction_verified",
+                "node_id": self.node_id,
+                "result": False,
+                "error": str(e)
+            }
+            self.p2p_node.send_message(response, sock)
+    
+    def handle_transaction_verified(self, message, sock):
+        """Handle transaction verification responses"""
+        result = message.get('result', False)
+        transaction_crc = message.get('transaction_crc')
+        sender_id = message.get('node_id')
+        
+        if result and transaction_crc and sender_id:
+            # Find transaction in pending pool
+            for tx in self.pending_transactions:
+                if tx.crc == transaction_crc:
+                    # Add confirmation
+                    node_num = int(sender_id.replace('node', ''))
+                    port = f"500{node_num}"
+                    tx.confirmations.add(f"http://{sender_id}:{port}")
+                    logger.info(f"Added confirmation from {sender_id} for transaction {transaction_crc}")
+                    break
+    
+    def handle_block_verified(self, message, sock):
+        """Handle block verification responses"""
+        result = message.get('result', False)
+        block_index = message.get('block_index')
+        block_hash = message.get('block_hash')
+        sender_id = message.get('node_id')
+        
+        if result and block_index is not None and block_hash and sender_id:
+            logger.info(f"Block {block_index} verified by node {sender_id}")
+            # Could add confirmation tracking if needed
 
     def start_data_verification(self):
         """Start periodic data verification"""
@@ -553,53 +2433,36 @@ class BlockchainNode:
         return node_addresses
 
     def broadcast_transaction(self, transaction):
-        """Broadcast transaction to other nodes and collect confirmations"""
-        logger.info("Broadcasting transaction")
-        logger.info(f"Current node: {self.node_id}")
-        logger.info(f"Broadcasting to nodes: {self.nodes}")
-
-        def confirm_with_node(node_address):
-            try:
-                logger.info(f"Contacting node: {node_address}")
-                response = requests.post(
-                    f"{node_address}/blockchain/verify_transaction",
-                    json=transaction.to_dict(),
-                    timeout=5
-                )
-                if response.status_code == 200:
-                    logger.info(f"Node {node_address} confirmed transaction")
-                    # Dodaj potwierdzenie do transakcji
-                    transaction.confirmations.add(node_address)
-                    return node_address
-                else:
-                    logger.warning(f"Node {node_address} rejected transaction with status {response.status_code}")
-            except requests.exceptions.RequestException as e:
-                logger.error(f"Error contacting node {node_address}: {e}")
-            return None
-
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            futures = [executor.submit(confirm_with_node, node) for node in self.nodes]
-            confirmations = set()
-            for future in as_completed(futures):
-                result = future.result()
-                if result:
-                    confirmations.add(result)
-
+        """Broadcast transaction using P2P network"""
+        logger.info("Broadcasting transaction via P2P")
+        
+        # Add our confirmation
         node_num = int(self.node_id.replace('node', ''))
         port = f"500{node_num}"
         transaction.confirmations.add(f"http://{self.node_id}:{port}")
         
-        # required_confirmations = (len(self.nodes) + 1) // 2  # +1 aby uwzględnić bieżący węzeł
-        required_confirmations = 6
+        # Broadcast via P2P
+        message = {
+            "type": "new_transaction",
+            "transaction": transaction.to_dict(),
+            "node_id": self.node_id,
+            "originator": self.node_id,
+            "timestamp": time.time()
+        }
+        
+        self.p2p_node.broadcast_message(message)
+        
+        # Wait a bit for confirmations to accumulate
+        time.sleep(2)
+        
+        required_confirmations = (len(self.nodes) + 1) // 2
         logger.info(f"Confirmations: {len(transaction.confirmations)} / {len(self.nodes) + 1} required: {required_confirmations}")
         return len(transaction.confirmations) >= required_confirmations
-
-
+    
     def broadcast_mined_block(self, block):
-        """Broadcast mined block to other nodes for verification and consensus"""
-        logger.info(f"Broadcasting mined block {block.index} to network")
+        """Broadcast mined block using P2P network"""
+        logger.info(f"Broadcasting mined block {block.index} via P2P")
         
-        confirmations = set()
         block_data = {
             'index': block.index,
             'previous_hash': block.previous_hash,
@@ -608,30 +2471,23 @@ class BlockchainNode:
             'hash': block.hash,
             'nonce': block.nonce
         }
-
-        def get_node_confirmation(node):
-            try:
-                response = requests.post(
-                    f'{node}/blockchain/verify_mined_block',
-                    json=block_data,
-                    timeout=5
-                )
-                if response.status_code == 200:
-                    logger.info(f"Node {node} confirmed mined block")
-                    return node
-            except Exception as e:
-                logger.error(f"Error getting confirmation from {node}: {e}")
-            return None
-
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            future_to_node = {executor.submit(get_node_confirmation, node): node 
-                            for node in self.nodes}
-            for future in as_completed(future_to_node):
-                if future.result():
-                    confirmations.add(future.result())
-
+        
+        message = {
+            "type": "new_block",
+            "block": block_data,
+            "node_id": self.node_id,
+            "originator": self.node_id,
+            "timestamp": time.time()
+        }
+        
+        # Broadcast via P2P
+        success_count = self.p2p_node.broadcast_message(message)
+        
+        # Wait a bit for confirmations
+        time.sleep(2)
+        
         required_confirmations = (len(self.nodes) + 1) // 2
-        return len(confirmations) >= required_confirmations
+        return success_count >= required_confirmations
 
     def is_chain_valid(self, chain):
         """Verify if a given chain is valid"""
@@ -896,6 +2752,20 @@ class BlockchainNode:
                 }
             finally:
                 self.mining_status["is_mining"] = False
+
+        def generate_docker_node_addresses(self, num_nodes):
+            """Generuje adresy węzłów używając nazw serwisów Docker"""
+            node_addresses = []
+            for i in range(1, num_nodes + 1):
+                if f"node{i}" != self.node_id:
+                    node_addresses.append(f"http://node{i}:500{i}")
+            return node_addresses
+        
+        def create_genesis_block(self):
+            return Block(0, "0", [Transaction("Genesis Block")], time.time())
+        
+        def get_latest_block(self):
+            return self.chain[-1]
 
 def create_blockchain_app():
     app = Flask(__name__)

@@ -1,74 +1,122 @@
 import { Injectable } from '@angular/core';
-import { HttpClient, HttpHeaders } from '@angular/common/http';
-import {
-  Observable,
-  BehaviorSubject,
-  tap,
-  switchMap,
-  catchError,
-  of,
-} from 'rxjs';
-import { environment } from 'src/environments/environment.development';
-import { ImageResponse, BlockchainResponse } from '../models/models';
-import { AuthService } from './auth.service';
+import { HttpClient } from '@angular/common/http';
+import { Observable, BehaviorSubject, tap } from 'rxjs';
+import { environment } from 'src/environments/environment';
 
-export interface Photo {
-  id: string;
-  url: string;
-  title: string;
-}
 @Injectable({
   providedIn: 'root',
 })
 export class PhotoService {
-  private readonly apiUrl = environment.apiURL;
-  private photos$ = new BehaviorSubject<any[]>([]);
+  private apiUrl = environment.apiURL;
 
-  constructor(private http: HttpClient, private authService: AuthService) {}
+  // Keep track of node status
+  private nodeStatus = new BehaviorSubject<{ [key: number]: boolean }>({
+    1: true,
+    2: true,
+    3: true,
+    4: true,
+    5: true,
+    6: true,
+  });
 
-  get photos(): Observable<any[]> {
-    return this.photos$.asObservable();
+  nodeStatus$ = this.nodeStatus.asObservable();
+
+  constructor(private http: HttpClient) {
+    // Initialize by checking node status
+    this.checkAllNodesStatus();
   }
 
-  private get authHeaders(): HttpHeaders {
-    return new HttpHeaders({
-      Authorization: this.authService.authToken,
-    });
-  }
-
-  uploadAndProcessPhoto(file: File): Observable<BlockchainResponse> {
+  uploadAndProcessPhoto(file: File): Observable<any> {
     const formData = new FormData();
-    formData.append('image', file);
+    formData.append('file', file);
 
-    return this.http
-      .post<ImageResponse>(`${this.apiUrl}/user/upload-image`, formData, {
-        headers: this.authHeaders,
-      })
-      .pipe(
-        switchMap(() => this.processPhotoInBlockchain(formData)),
-        switchMap(() => this.mineBlock()),
-        switchMap(() => this.getBlockchain()),
-        catchError((error) => {
-          console.error('Error processing photo:', error);
-          return of({ success: false, message: 'Failed to process photo' });
-        })
-      );
-  }
-
-  private processPhotoInBlockchain(
-    formData: FormData
-  ): Observable<ImageResponse> {
-    return this.http.post<ImageResponse>(
-      `${this.apiUrl}/blockchain/image/process`,
+    return this.http.post(
+      `${this.apiUrl}/blockchain/transactions/new/image`,
       formData
     );
   }
 
-  private mineBlock(): Observable<BlockchainResponse> {
-    return this.http.get<BlockchainResponse>(`${this.apiUrl}/blockchain/mine`);
+  getChain(nodeId: number = 1): Observable<any> {
+    return this.http.get(`http://localhost:500${nodeId}/blockchain/chain`);
   }
 
-  getBlockchain(): Observable<BlockchainResponse> {
-    return this.http.get<BlockchainResponse>(`${this.apiUrl}/blockchain/chain`);
+  getNodes(): Observable<any> {
+    return this.http.get(`${this.apiUrl}/nodes`);
+  }
+
+  toggleNode(nodeId: number, active: boolean): Observable<any> {
+    if (!active) {
+      return this.http
+        .post(`http://localhost:500${nodeId}/blockchain/simulate/failure`, {
+          type: 'node_down',
+        })
+        .pipe(
+          tap(() => {
+            const currentStatus = this.nodeStatus.value;
+            this.nodeStatus.next({
+              ...currentStatus,
+              [nodeId]: false,
+            });
+          })
+        );
+    } else {
+      // This would require an endpoint to bring a node back up
+      // Since this is a simulation, you might need to add this functionality
+      return this.http
+        .post(`http://localhost:500${nodeId}/blockchain/simulate/recover`, {})
+        .pipe(
+          tap(() => {
+            const currentStatus = this.nodeStatus.value;
+            this.nodeStatus.next({
+              ...currentStatus,
+              [nodeId]: true,
+            });
+          })
+        );
+    }
+  }
+
+  simulateHashCorruption(nodeId: number): Observable<any> {
+    return this.http.post(
+      `http://localhost:500${nodeId}/blockchain/simulate/failure`,
+      {
+        type: 'hash_corruption',
+      }
+    );
+  }
+
+  simulateDataCorruption(nodeId: number): Observable<any> {
+    return this.http.post(
+      `http://localhost:500${nodeId}/blockchain/simulate/failure`,
+      {
+        type: 'data_corruption',
+      }
+    );
+  }
+
+  private checkAllNodesStatus() {
+    // Check status of all nodes
+    for (let i = 1; i <= 6; i++) {
+      this.http
+        .get(`http://localhost:500${i}/blockchain/status`, {
+          observe: 'response',
+        })
+        .subscribe({
+          next: () => {
+            const currentStatus = this.nodeStatus.value;
+            this.nodeStatus.next({
+              ...currentStatus,
+              [i]: true,
+            });
+          },
+          error: () => {
+            const currentStatus = this.nodeStatus.value;
+            this.nodeStatus.next({
+              ...currentStatus,
+              [i]: false,
+            });
+          },
+        });
+    }
   }
 }
