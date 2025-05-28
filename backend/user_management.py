@@ -1,10 +1,11 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 import jwt
 import datetime
 from werkzeug.security import generate_password_hash, check_password_hash
 import psycopg2
 from functools import wraps
 import os
+import io
 
 def get_db_connection():
     return psycopg2.connect(
@@ -51,7 +52,7 @@ def token_required(f):
             return jsonify({'message': 'Token is missing'}), 401
         
         try:
-            data = jwt.decode(token, os.getenv(''), algorithms=["HS256"])
+            data = jwt.decode(token, os.getenv('SECRET_KEY', 'default_secret_key'), algorithms=["HS256"])
         except:
             return jsonify({'message': 'Invalid token'}), 401
             

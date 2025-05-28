@@ -8,3 +8,5 @@ requests==2.26.0
 pillow==9.5.0 
 python-multipart==0.0.5
 flask-cors
+torrentool==1.1.1
+bencode.py==4.0.0

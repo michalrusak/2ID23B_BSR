@@ -17,6 +17,16 @@ export interface Photo {
   url: string;
   title: string;
 }
+
+export interface TorrentInfo {
+  info_hash: string;
+  name: string;
+  size: number;
+  created_by: string;
+  comment: string;
+  announce_urls: string[];
+}
+
 @Injectable({
   providedIn: 'root',
 })
@@ -70,5 +80,41 @@ export class PhotoService {
 
   getBlockchain(): Observable<BlockchainResponse> {
     return this.http.get<BlockchainResponse>(`${this.apiUrl}/blockchain/chain`);
+  }
+
+  // New torrent-related methods
+  getBlockchainTorrent(): Observable<Blob> {
+    return this.http.get(`${this.apiUrl}/blockchain/chain/torrent`, {
+      responseType: 'blob',
+    });
+  }
+
+  getBlockchainDataFile(): Observable<Blob> {
+    return this.http.get(`${this.apiUrl}/blockchain/chain/torrent/data`, {
+      responseType: 'blob',
+    });
+  }
+
+  getTorrentInfo(): Observable<{
+    success: boolean;
+    torrent_info: TorrentInfo;
+    blockchain_info: any;
+  }> {
+    return this.http.get<{
+      success: boolean;
+      torrent_info: TorrentInfo;
+      blockchain_info: any;
+    }>(`${this.apiUrl}/blockchain/chain/torrent/info`);
+  }
+
+  downloadFile(blob: Blob, filename: string): void {
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    window.URL.revokeObjectURL(url);
+    document.body.removeChild(a);
   }
 }

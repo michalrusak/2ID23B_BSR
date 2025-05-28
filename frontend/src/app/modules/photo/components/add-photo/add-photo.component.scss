@@ -173,3 +173,109 @@ mat-card {
     }
   }
 }
+.torrent-container {
+  background: #ffffff;
+  border-radius: 8px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+  padding: 20px;
+  margin-bottom: 20px;
+  max-width: 800px;
+}
+
+.torrent-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 15px;
+}
+
+.torrent-button {
+  background: #4a69bd;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  padding: 10px 15px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: 500;
+  transition: background-color 0.2s;
+
+  &:hover {
+    background: #1e3799;
+  }
+
+  &:active {
+    transform: translateY(1px);
+  }
+}
+
+.error-message {
+  color: #e74c3c;
+  margin: 10px 0;
+  padding: 10px;
+  background: #fadbd8;
+  border-radius: 4px;
+}
+
+.loading-spinner {
+  margin: 15px 0;
+  color: #7f8c8d;
+  font-style: italic;
+}
+
+.torrent-info {
+  margin-top: 20px;
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 15px;
+
+    td {
+      padding: 8px;
+      border-bottom: 1px solid #ecf0f1;
+
+      &:first-child {
+        width: 120px;
+      }
+    }
+  }
+
+  .tracker-list {
+    margin-top: 15px;
+
+    h4 {
+      margin-bottom: 10px;
+    }
+
+    ul {
+      list-style-type: none;
+      padding-left: 0;
+
+      li {
+        padding: 5px 0;
+        font-family: monospace;
+        word-break: break-all;
+      }
+    }
+  }
+
+  .torrent-help {
+    margin-top: 20px;
+    padding: 10px;
+    background: #f8f9fa;
+    border-radius: 4px;
+
+    p {
+      margin: 0;
+      color: #2c3e50;
+
+      i {
+        color: #3498db;
+        margin-right: 5px;
+      }
+    }
+  }
+}

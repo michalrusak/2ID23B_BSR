@@ -1,6 +1,6 @@
 import os
 import random
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_file
 import hashlib
 import time
 import json
@@ -12,6 +12,7 @@ import io
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
+from torrent_utils import BlockchainTorrent
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -901,6 +902,7 @@ def create_blockchain_app():
     app = Flask(__name__)
     node_id = os.getenv('NODE_ID', 'node1')
     blockchain = BlockchainNode(node_id=node_id)
+    torrent_manager = BlockchainTorrent(node_id=node_id)
 
     @app.route('/simulate/failure', methods=['POST'])
     def simulate_failure():
@@ -1199,43 +1201,139 @@ def create_blockchain_app():
         }
         return jsonify(response), 200
 
-    @app.route('/nodes/resolve', methods=['GET'])
-    def consensus():
-        logger.info("Starting consensus resolution")
-        replaced = blockchain.resolve_conflicts()
-        chain_data = [{
-            'index': block.index,
-            'previous_hash': block.previous_hash,
-            'transactions': [t.to_dict() for t in block.transactions],
-            'timestamp': block.timestamp,
-            'hash': block.hash
-        } for block in blockchain.chain]
-
-        if replaced:
-            logger.info("Chain was replaced with a longer valid chain")
-        else:
-            logger.info("Current chain is authoritative")
-
-        return jsonify({
-            'message': 'Chain was replaced' if replaced else 'Chain is authoritative',
-            'chain': chain_data,
-            'length': len(blockchain.chain)
-        }), 200
-    
-    @app.route('/verify_hashes', methods=['POST'])
-    def verify_hashes():
-        """Endpoint to trigger hash verification"""
+    @app.route('/chain/torrent', methods=['GET'])
+    def get_chain_torrent():
+        """Create and serve a torrent file of the blockchain data"""
+        logger.info("Creating blockchain torrent file")
+        
         try:
-            blockchain.verify_and_correct_hashes()
-            return jsonify({
-                'message': 'Hash verification completed',
-                'status': 'success'
-            }), 200
+            # Get blockchain data
+            chain_data = {
+                'chain': [
+                    {
+                        'index': block.index,
+                        'previous_hash': block.previous_hash,
+                        'timestamp': block.timestamp,
+                        'transactions': [t.to_dict() for t in block.transactions],
+                        'hash': block.hash,
+                        'confirmations': len(block.transactions[0].confirmations)
+                    }
+                    for block in blockchain.chain
+                ],
+                'length': len(blockchain.chain),
+                'node_id': blockchain.node_id,
+                'export_timestamp': time.time()
+            }
+            
+            # Create torrent file
+            torrent_data = torrent_manager.create_torrent_file(
+                chain_data, 
+                comment=f"Blockchain export from node {blockchain.node_id}"
+            )
+            
+            if not torrent_data:
+                return jsonify({'error': 'Failed to create torrent file'}), 500
+                
+            # Return the torrent file
+            return send_file(
+                torrent_data['torrent_path'],
+                as_attachment=True,
+                download_name=f"blockchain_{blockchain.node_id}_{int(time.time())}.torrent",
+                mimetype='application/x-bittorrent'
+            )
+            
         except Exception as e:
-            logger.error(f"Error during hash verification: {e}")
+            logger.error(f"Error creating torrent: {str(e)}")
+            return jsonify({'error': str(e)}), 500
+
+    @app.route('/chain/torrent/data', methods=['GET'])
+    def get_torrent_data_file():
+        """Serve the blockchain data file directly"""
+        logger.info("Serving blockchain data file for torrent")
+        
+        try:
+            # Get blockchain data
+            chain_data = {
+                'chain': [
+                    {
+                        'index': block.index,
+                        'previous_hash': block.previous_hash,
+                        'timestamp': block.timestamp,
+                        'transactions': [t.to_dict() for t in block.transactions],
+                        'hash': block.hash,
+                        'confirmations': len(block.transactions[0].confirmations)
+                    }
+                    for block in blockchain.chain
+                ],
+                'length': len(blockchain.chain),
+                'node_id': blockchain.node_id,
+                'export_timestamp': time.time()
+            }
+            
+            # Create data file
+            data_file = torrent_manager.blockchain_to_file(chain_data)
+            
+            if not data_file:
+                return jsonify({'error': 'Failed to create blockchain data file'}), 500
+                
+            # Return the data file
+            return send_file(
+                data_file,
+                as_attachment=True,
+                download_name=f"blockchain_data_{blockchain.node_id}_{int(time.time())}.json",
+                mimetype='application/json'
+            )
+            
+        except Exception as e:
+            logger.error(f"Error serving blockchain data: {str(e)}")
+            return jsonify({'error': str(e)}), 500
+
+    @app.route('/chain/torrent/info', methods=['GET'])
+    def get_chain_torrent_info():
+        """Get information about the blockchain torrent"""
+        logger.info("Getting blockchain torrent info")
+        
+        try:
+            # Create torrent file first
+            chain_data = {
+                'chain': [
+                    {
+                        'index': block.index,
+                        'previous_hash': block.previous_hash,
+                        'timestamp': block.timestamp,
+                        'transactions': [t.to_dict() for t in block.transactions],
+                        'hash': block.hash,
+                        'confirmations': len(block.transactions[0].confirmations)
+                    }
+                    for block in blockchain.chain
+                ],
+                'length': len(blockchain.chain),
+                'node_id': blockchain.node_id,
+                'export_timestamp': time.time()
+            }
+            
+            torrent_data = torrent_manager.create_torrent_file(chain_data)
+            
+            if not torrent_data:
+                return jsonify({'error': 'Failed to create torrent file'}), 500
+                
+            # Get torrent info
+            torrent_info = torrent_manager.get_torrent_info(torrent_data['torrent_path'])
+            
+            if not torrent_info:
+                return jsonify({'error': 'Failed to get torrent info'}), 500
+                
             return jsonify({
-                'message': f'Hash verification failed: {str(e)}',
-                'status': 'error'
-            }), 500
+                'success': True,
+                'torrent_info': torrent_info,
+                'blockchain_info': {
+                    'length': len(blockchain.chain),
+                    'node_id': blockchain.node_id
+                }
+            }), 200
+            
+        except Exception as e:
+            logger.error(f"Error getting torrent info: {str(e)}")
+            return jsonify({'error': str(e)}), 500
 
     return app
