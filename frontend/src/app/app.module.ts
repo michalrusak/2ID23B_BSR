@@ -10,6 +10,7 @@ import { StoreModule } from '@ngrx/store';
 import { StoreDevtoolsModule } from '@ngrx/store-devtools';
 import { NotifierOptions, NotifierModule } from 'angular-notifier';
 import { PhotoModule } from './modules/photo/photo.module';
+import { P2PModule } from './modules/p2p/p2p.module';
 
 const customNotifier: NotifierOptions = {
   position: {
@@ -36,6 +37,7 @@ const customNotifier: NotifierOptions = {
     HomeModule,
     AuthModule,
     PhotoModule,
+    P2PModule,
     StoreDevtoolsModule.instrument({ maxAge: 25, logOnly: !isDevMode() }),
     NotifierModule.withConfig(customNotifier),
   ],

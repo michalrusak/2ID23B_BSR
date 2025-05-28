@@ -1,5 +1,4 @@
 import { Component, OnInit } from '@angular/core';
-import { Store } from '@ngrx/store';
 
 @Component({
   selector: 'app-root',
@@ -10,6 +9,7 @@ export class AppComponent implements OnInit {
   title = 'Photo App';
 
   ngOnInit(): void {
-    throw new Error('Method not implemented.');
+    // Initialize the app
+    console.log('App initialized');
   }
 }

@@ -1,10 +1,11 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 import jwt
 import datetime
 from werkzeug.security import generate_password_hash, check_password_hash
 import psycopg2
 from functools import wraps
 import os
+import io
 
 def get_db_connection():
     return psycopg2.connect(
@@ -61,7 +62,7 @@ def token_required(f):
 
 def create_user_app():
     app = Flask(__name__)
-    app.config['SECRET_KEY'] = os.getenv('SECRET_KEY')
+    app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'default_secret_key')  # Add default secret key
     
     # Initialize database
     init_db()
@@ -88,6 +89,9 @@ def create_user_app():
         except psycopg2.IntegrityError:
             conn.rollback()
             return jsonify({'message': 'Username already exists'}), 400
+        except Exception as e:
+            conn.rollback()
+            return jsonify({'message': f'Database error: {str(e)}'}), 500
         finally:
             cur.close()
             conn.close()
@@ -140,7 +144,7 @@ def create_user_app():
                 return jsonify({'message': 'Token is missing'}), 401
                 
             try:
-                # Decode the token
+                # Decode the token with default secret key if not set
                 data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=["HS256"])
                 current_user_id = data['user_id']
             except jwt.ExpiredSignatureError:

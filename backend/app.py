@@ -9,11 +9,11 @@ from user_management import create_user_app
 from dotenv import load_dotenv
 import signal
 import multiprocessing
+import bencodepy  # Required for P2P functionality
 
-# Wczytaj zmienne środowiskowe
+
 load_dotenv()
 
-# Konfiguracja loggera
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -23,10 +23,8 @@ def create_app():
 
     try:
         app = Flask(__name__)
-        CORS(app, resources={
-            r"/blockchain/*": {"origins": ["http://localhost:4200"]},
-            r"/user/*": {"origins": ["http://localhost:4200"]}
-        })
+        # More permissive CORS for development
+        CORS(app, origins=["*"], supports_credentials=True, allow_headers=["*"])
 
         # Tworzenie pod-aplikacji
         logger.info("Tworzenie aplikacji blockchain...")
@@ -35,15 +33,20 @@ def create_app():
         logger.info("Tworzenie aplikacji user management...")
         user_app = create_user_app()
 
-        # Dodawanie CORS do pod-aplikacji
-        CORS(blockchain_app, resources={r"/*": {"origins": ["http://localhost:4200"]}})
-        CORS(user_app, resources={r"/*": {"origins": ["http://localhost:4200"]}})
+        # Apply CORS to sub-applications
+        CORS(blockchain_app, origins=["*"], supports_credentials=True, allow_headers=["*"])
+        CORS(user_app, origins=["*"], supports_credentials=True, allow_headers=["*"])
 
         # Łączenie pod-aplikacji z główną aplikacją
         app.wsgi_app = DispatcherMiddleware(app.wsgi_app, {
             '/blockchain': blockchain_app,
             '/user': user_app
         })
+
+        # Add root health check endpoint
+        @app.route('/health')
+        def health():
+            return {"status": "healthy"}
 
         logger.info("Główna aplikacja została utworzona pomyślnie.")
         return app
@@ -65,9 +68,22 @@ def start_network(num_nodes=6, start_port=5001):
     
     for i in range(num_nodes):
         port = start_port + i
-        process = multiprocessing.Process(target=start_node, args=(port))
+        node_id = f"node{i+1}"
+        
+        # Set environment variables for this process
+        env = os.environ.copy()
+        env['NODE_ID'] = node_id
+        env['PORT'] = str(port)
+        
+        # Start node process
+        process = multiprocessing.Process(
+            target=start_node,
+            args=(port,),
+            name=node_id
+        )
         process.start()
         processes.append(process)
+        logger.info(f"Started node {node_id} on port {port}")
 
     def signal_handler(sig, frame):
         logger.info("Zamykanie sieci...")

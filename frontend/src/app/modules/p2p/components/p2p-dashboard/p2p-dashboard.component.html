@@ -1,0 +1,82 @@
+<div class="p2p-dashboard">
+  <h1>P2P Network Dashboard</h1>
+
+  <div class="dashboard-container">
+    <div class="status-panel">
+      <h2>Network Status</h2>
+      <div class="refresh-container">
+        <button (click)="refreshData()" class="refresh-button">Refresh Data</button>
+        <span class="last-action">{{ lastAction }}</span>
+      </div>
+
+      <div class="nodes-grid">
+        <div *ngFor="let i of [1, 2, 3, 4, 5, 6]" class="node-card" [class.inactive]="!networkStatus['node'+i]">
+          <div class="node-header">
+            <span class="node-status" [class.active]="networkStatus['node'+i]"></span>
+            <h3>Node {{i}}</h3>
+          </div>
+          <div class="node-actions">
+            <button (click)="simulateNodeFailure(i)" [disabled]="!networkStatus['node'+i]">
+              Simulate Failure
+            </button>
+            <button (click)="simulateDataCorruption(i)" [disabled]="!networkStatus['node'+i]">
+              Corrupt Data
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <button (click)="simulateNetworkPartition()" class="action-button">
+        Simulate Network Partition
+      </button>
+    </div>
+
+    <div class="network-panel">
+      <h2>Peer Connections</h2>
+      <div class="peers-list">
+        <div *ngIf="(peers$ | async)?.length === 0" class="no-data">
+          No peers connected
+        </div>
+        <div *ngFor="let peer of peers$ | async" class="peer-item" [class.inactive]="!peer.isActive">
+          <div class="peer-status" [class.active]="peer.isActive"></div>
+          <div class="peer-info">
+            <span class="peer-id">{{ peer.node_id }}</span>
+            <span class="peer-address">{{ peer.address }}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="torrent-panel">
+      <h2>P2P File Sharing</h2>
+
+      <div class="file-upload">
+        <h3>Share New File</h3>
+        <input type="file" (change)="onFileSelected($event)" />
+        <button (click)="uploadFileTorrent()" [disabled]="!testingFile">Create Torrent</button>
+      </div>
+
+      <div class="torrent-download">
+        <h3>Download Shared File</h3>
+        <input type="text" [(ngModel)]="infohash" placeholder="Enter infohash" />
+        <button (click)="downloadTorrent()" [disabled]="!infohash">Download</button>
+      </div>
+
+      <div class="torrents-list">
+        <h3>Available Torrents</h3>
+        <div *ngIf="(torrents$ | async)?.length === 0" class="no-data">
+          No torrents available
+        </div>
+        <div *ngFor="let torrent of torrents$ | async" class="torrent-item">
+          <div class="torrent-info">
+            <span class="torrent-name">{{ torrent.name }}</span>
+            <span class="torrent-hash">{{ torrent.infohash }}</span>
+            <span class="torrent-size">{{ torrent.size | number }} bytes</span>
+            <span class="torrent-peers">{{ torrent.peers.length || 0 }} peers</span>
+          </div>
+          <button (click)="infohash = torrent.infohash">Use</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
