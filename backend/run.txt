@@ -1,6 +1,30 @@
+# Setup steps
+
+# 1. Install requirements
 pip install -r requirements.txt
 
+# 2. Set the HOST_IP environment variable to localhost
+set HOST_IP=127.0.0.1  # On Windows
+# or
+export HOST_IP=127.0.0.1  # On Linux/Mac
+
+# 3. Build and start all services
 docker-compose up --build
 
-# Stop all containers and remove volumes
+# 4. Access the blockchain torrent service
+# Visit http://localhost:5001/blockchain/chain/torrent/external
+# This will download a torrent file configured for localhost
+
+# 5. Open the torrent file in your BitTorrent client
+# The client should connect to the tracker at http://127.0.0.1:6969/announce
+# The seeder service will automatically seed the data
+
+# 6. To verify everything is working:
+# - Check the tracker status: http://localhost:6969/stats
+# - Check the debug info: http://localhost:6969/debug
+
+# 7. To stop all services
+docker-compose down
+
+# 8. To stop all containers and remove volumes
 docker-compose down -v

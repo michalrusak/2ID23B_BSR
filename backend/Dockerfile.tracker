@@ -1,0 +1,27 @@
+FROM python:3.9-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    libpq-dev \
+    gcc \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements and install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt bencode.py
+
+# Copy application code
+COPY . .
+
+# Expose tracker port
+EXPOSE 6969
+
+# Environment variables
+ENV TRACKER_PORT=6969
+ENV TRACKER_HOST=0.0.0.0
+
+# Command to run the application
+CMD ["python", "tracker_server.py"]

@@ -1207,6 +1207,14 @@ def create_blockchain_app():
         logger.info("Creating blockchain torrent file")
         
         try:
+            # Get custom trackers from request if provided
+            custom_trackers = request.args.get('trackers')
+            trackers = None
+            if custom_trackers:
+                # Split comma-separated list of trackers
+                trackers = custom_trackers.split(',')
+                logger.info(f"Using custom trackers: {trackers}")
+            
             # Get blockchain data
             chain_data = {
                 'chain': [
@@ -1225,9 +1233,10 @@ def create_blockchain_app():
                 'export_timestamp': time.time()
             }
             
-            # Create torrent file
+            # Create torrent file with optional custom trackers
             torrent_data = torrent_manager.create_torrent_file(
                 chain_data, 
+                announce_urls=trackers,
                 comment=f"Blockchain export from node {blockchain.node_id}"
             )
             
@@ -1270,7 +1279,7 @@ def create_blockchain_app():
                 'export_timestamp': time.time()
             }
             
-            # Create data file
+            # Create data file that will automatically decode base64 image data
             data_file = torrent_manager.blockchain_to_file(chain_data)
             
             if not data_file:
@@ -1294,6 +1303,14 @@ def create_blockchain_app():
         logger.info("Getting blockchain torrent info")
         
         try:
+            # Get custom trackers from request if provided
+            custom_trackers = request.args.get('trackers')
+            trackers = None
+            if custom_trackers:
+                # Split comma-separated list of trackers
+                trackers = custom_trackers.split(',')
+                logger.info(f"Using custom trackers: {trackers}")
+                
             # Create torrent file first
             chain_data = {
                 'chain': [
@@ -1312,7 +1329,7 @@ def create_blockchain_app():
                 'export_timestamp': time.time()
             }
             
-            torrent_data = torrent_manager.create_torrent_file(chain_data)
+            torrent_data = torrent_manager.create_torrent_file(chain_data, announce_urls=trackers)
             
             if not torrent_data:
                 return jsonify({'error': 'Failed to create torrent file'}), 500
@@ -1335,5 +1352,127 @@ def create_blockchain_app():
         except Exception as e:
             logger.error(f"Error getting torrent info: {str(e)}")
             return jsonify({'error': str(e)}), 500
+
+    @app.route('/chain/torrent/external', methods=['GET'])
+    def get_external_torrent():
+        """Create and serve a torrent file optimized for external clients"""
+        logger.info("Creating blockchain torrent file for external client")
+        
+        try:
+            # Always use localhost for local testing
+            host_ip = "127.0.0.1"
+            external_tracker = f"http://{host_ip}:6969/announce"
+            
+            # Use only our custom tracker for external clients
+            custom_trackers = [external_tracker]
+            logger.info(f"Using external tracker: {external_tracker}")
+            
+            # Get blockchain data
+            chain_data = {
+                'chain': [
+                    {
+                        'index': block.index,
+                        'previous_hash': block.previous_hash,
+                        'timestamp': block.timestamp,
+                        'transactions': [t.to_dict() for t in block.transactions],
+                        'hash': block.hash,
+                        'confirmations': len(block.transactions[0].confirmations)
+                    }
+                    for block in blockchain.chain
+                ],
+                'length': len(blockchain.chain),
+                'node_id': blockchain.node_id,
+                'export_timestamp': time.time()
+            }
+            
+            # Create torrent file with only our custom tracker
+            torrent_data = torrent_manager.create_torrent_file(
+                chain_data, 
+                announce_urls=custom_trackers,
+                comment=f"Blockchain export from node {blockchain.node_id} (External client)"
+            )
+            
+            if not torrent_data:
+                return jsonify({'error': 'Failed to create torrent file'}), 500
+                
+            logger.info(f"External torrent created with tracker: {custom_trackers}")
+                
+            # Return the torrent file
+            return send_file(
+                torrent_data['torrent_path'],
+                as_attachment=True,
+                download_name=f"blockchain_{blockchain.node_id}_external_{int(time.time())}.torrent",
+                mimetype='application/x-bittorrent'
+            )
+            
+        except Exception as e:
+            logger.error(f"Error creating external torrent: {str(e)}")
+            return jsonify({'error': str(e)}), 500
+
+    @app.route('/chain/torrent/list', methods=['GET'])
+    def list_torrent_files():
+        """List all available torrent files"""
+        logger.info("Listing available torrent files")
+        
+        try:
+            torrent_files = torrent_manager.list_torrent_files()
+            data_files = torrent_manager.list_data_files()
+            
+            return jsonify({
+                'success': True,
+                'torrent_files': torrent_files,
+                'data_files': data_files,
+                'data_directory': torrent_manager.data_dir
+            }), 200
+            
+        except Exception as e:
+            logger.error(f"Error listing torrent files: {str(e)}")
+            return jsonify({'error': str(e)}), 500
+
+    @app.route('/chain/torrent/download/<filename>', methods=['GET'])
+    def download_torrent_file(filename):
+        """Download a specific torrent file by name"""
+        logger.info(f"Downloading torrent file: {filename}")
+        
+        try:
+            file_path = os.path.join(torrent_manager.data_dir, filename)
+            
+            if not os.path.exists(file_path):
+                return jsonify({'error': 'Torrent file not found'}), 404
+                
+            return send_file(
+                file_path,
+                as_attachment=True,
+                download_name=filename,
+                mimetype='application/x-bittorrent' if filename.endswith('.torrent') else 'application/json'
+            )
+            
+        except Exception as e:
+            logger.error(f"Error downloading torrent file: {str(e)}")
+            return jsonify({'error': str(e)}), 500
+
+    @app.route('/chain/torrent/instructions', methods=['GET'])
+    def get_torrent_instructions():
+        """Get instructions for using the torrents"""
+        host_ip = os.getenv('HOST_IP', request.host.split(':')[0])
+        
+        instructions = {
+            'tracker_url': f"http://{host_ip}:6969/announce",
+            'available_endpoints': {
+                'list_torrents': '/blockchain/chain/torrent/list',
+                'download_torrent': '/blockchain/chain/torrent/download/<filename>',
+                'create_new_torrent': '/blockchain/chain/torrent',
+                'external_torrent': '/blockchain/chain/torrent/external',
+                'torrent_info': '/blockchain/chain/torrent/info'
+            },
+            'how_to_use': [
+                "1. Download a torrent file from /blockchain/chain/torrent/list",
+                f"2. Open the torrent in your BitTorrent client (like uTorrent or qBittorrent)",
+                f"3. Make sure the tracker {host_ip}:6969 is included in the torrent",
+                "4. The torrent should connect to our tracker and download the blockchain data"
+            ]
+        }
+        
+        return jsonify(instructions), 200
 
     return app

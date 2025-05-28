@@ -1,0 +1,27 @@
+FROM python:3.9-slim
+
+WORKDIR /app
+
+# Install system dependencies (aria2 for BitTorrent seeding)
+RUN apt-get update && apt-get install -y \
+    aria2 \
+    curl \
+    net-tools \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements and install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt watchdog
+
+# Copy application code
+COPY . .
+
+# Create data directory
+RUN mkdir -p /app/blockchain_data
+
+# Expose BitTorrent ports (TCP and UDP)
+EXPOSE 6881-6889/tcp
+EXPOSE 6881-6889/udp
+
+# Command to run the seeder service
+CMD ["python", "seed_service.py"]
