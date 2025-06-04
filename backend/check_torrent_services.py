@@ -19,7 +19,7 @@ def check_tracker_status():
     tracker_addresses = [
         "http://127.0.0.1:6969/stats",
         "http://localhost:6969/stats",
-        "http://tracker:6969/stats"
+        "http://localhost:6969/stats"
     ]
     
     host_ip = os.getenv('HOST_IP')

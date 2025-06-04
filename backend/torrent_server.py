@@ -31,6 +31,9 @@ class BitTorrentServer:
         try:
             # Define trackers - use custom ones if provided or use defaults
             trackers = custom_trackers or [
+               ' http://localhost:6969/announce',
+                'http://127.0.0.1:6969/announce',
+                'http:// 192.168.117.1:6969/announce',
                 "udp://tracker.opentrackr.org:1337/announce",
                 "udp://tracker.openbittorrent.com:80/announce",
                 "udp://tracker.torrent.eu.org:451/announce",

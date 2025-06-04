@@ -97,7 +97,7 @@ class BlockchainTorrent:
         if announce_urls is None:
             # Use "tracker" hostname instead of localhost when in Docker environment
             # This is crucial for container networking
-            host_ip = os.getenv('HOST_IP', 'tracker')
+            host_ip = os.getenv('HOST_IP', 'localhost')
             
             # If we're in a Docker environment, prefer the "tracker" hostname
             if os.path.exists('/.dockerenv'):
