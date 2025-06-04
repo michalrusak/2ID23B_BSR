@@ -3,28 +3,44 @@
 # 1. Install requirements
 pip install -r requirements.txt
 
-# 2. Set the HOST_IP environment variable to localhost
+# 2. Set the HOST_IP environment variable to localhost (IMPORTANT!)
 set HOST_IP=127.0.0.1  # On Windows
 # or
 export HOST_IP=127.0.0.1  # On Linux/Mac
 
-# 3. Build and start all services
-docker-compose up --build
+# 3. Create local data directory (important!)
+python ensure_data_dir.py
 
-# 4. Access the blockchain torrent service
+# 4. Build and start all services (or just the tracker and seeder if debugging)
+docker-compose up --build
+# Or for debugging just tracker and seeder:
+# docker-compose up --build tracker seeder
+
+# 5. Debugging torrent issues:
+# If you're having problems with seeding/downloading, run the debug script:
+python debug_torrents.py
+
+# 6. Check the seed status:
+# Visit http://localhost:5001/blockchain/chain/torrent/seed-status
+
+# 7. For manual torrent testing:
+# Create a test torrent and start seeding it:
+python manual_torrent.py create
+# Check if tracker is accessible:
+python manual_torrent.py check
+# List files in data directory:
+python manual_torrent.py list
+
+# 8. Access the blockchain torrent service
 # Visit http://localhost:5001/blockchain/chain/torrent/external
 # This will download a torrent file configured for localhost
 
-# 5. Open the torrent file in your BitTorrent client
-# The client should connect to the tracker at http://127.0.0.1:6969/announce
-# The seeder service will automatically seed the data
+# 9. To manually upload a torrent file:
+# Visit http://localhost:5001/blockchain/chain/torrent/upload
+# This endpoint accepts a POST request with a form field named 'torrent'
 
-# 6. To verify everything is working:
-# - Check the tracker status: http://localhost:6969/stats
-# - Check the debug info: http://localhost:6969/debug
-
-# 7. To stop all services
+# 10. To stop all services
 docker-compose down
 
-# 8. To stop all containers and remove volumes
+# 11. To stop all containers and remove volumes
 docker-compose down -v

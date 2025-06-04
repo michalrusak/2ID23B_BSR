@@ -47,6 +47,8 @@ services:
         delay: 5s
         max_attempts: 3
         window: 120s
+    volumes:
+      - blockchain_data:/app/blockchain_data
 
   node2:
     build: .
@@ -75,6 +77,8 @@ services:
         delay: 5s
         max_attempts: 3
         window: 120s
+    volumes:
+      - blockchain_data:/app/blockchain_data
 
   node3:
     build: .
@@ -103,6 +107,8 @@ services:
         delay: 5s
         max_attempts: 3
         window: 120s
+    volumes:
+      - blockchain_data:/app/blockchain_data
 
   node4:
     build: .
@@ -131,6 +137,8 @@ services:
         delay: 5s
         max_attempts: 3
         window: 120s
+    volumes:
+      - blockchain_data:/app/blockchain_data
 
   node5:
     build: .
@@ -159,6 +167,8 @@ services:
         delay: 5s
         max_attempts: 3
         window: 120s
+    volumes:
+      - blockchain_data:/app/blockchain_data
 
   node6:
     build: .
@@ -187,6 +197,8 @@ services:
         delay: 5s
         max_attempts: 3
         window: 120s
+    volumes:
+      - blockchain_data:/app/blockchain_data
 
   tracker:
     build:
@@ -196,7 +208,7 @@ services:
       - TRACKER_PORT=6969
       - TRACKER_HOST=0.0.0.0
       - EXTERNAL_TRACKER_URL=http://127.0.0.1:6969/announce
-      - HOST_IP=127.0.0.1
+      - HOST_IP=${HOST_IP:-127.0.0.1}
     ports:
       - "6969:6969"
     networks:
@@ -210,29 +222,39 @@ services:
       start_period: 20s
     volumes:
       - tracker_data:/data/tracker
+      - blockchain_data:/app/blockchain_data
+    deploy:
+      restart_policy:
+        condition: on-failure
 
   seeder:
     build:
       context: .
       dockerfile: Dockerfile.seeder
     volumes:
-      - ./blockchain_data:/app/blockchain_data # Mount the blockchain data directory
+      - blockchain_data:/app/blockchain_data
     depends_on:
       - tracker
     networks:
       - blockchain_network
     restart: always
     environment:
-      - HOST_IP=127.0.0.1
+      - HOST_IP=${HOST_IP:-127.0.0.1}
+      - TRACKER_HOST=tracker
+      - TRACKER_PORT=6969
     ports:
-      - "6881-6889:6881-6889/tcp" # BitTorrent TCP ports
-      - "6881-6889:6881-6889/udp" # BitTorrent UDP ports for uTP
+      - "6881-6889:6881-6889/tcp"
+      - "6881-6889:6881-6889/udp"
+      - "6800-6850:6800-6850/tcp"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:6881"]
+      test: ["CMD", "curl", "-f", "http://localhost:6881" ]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 20s
+    deploy:
+      restart_policy:
+        condition: on-failure
 
 networks:
   blockchain_network:
@@ -241,4 +263,4 @@ networks:
 volumes:
   postgres_data:
   tracker_data:
-  blockchain_data: # Add a new volume for blockchain data
+  blockchain_data:

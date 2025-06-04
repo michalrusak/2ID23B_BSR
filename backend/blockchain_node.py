@@ -1475,4 +1475,130 @@ def create_blockchain_app():
         
         return jsonify(instructions), 200
 
+    @app.route('/chain/torrent/upload', methods=['POST'])
+    def upload_torrent_file():
+        """Upload and start seeding a torrent file manually"""
+        logger.info("Manual torrent file upload endpoint called")
+        
+        try:
+            if 'torrent' not in request.files:
+                return jsonify({'error': 'No torrent file provided'}), 400
+                
+            torrent_file = request.files['torrent']
+            
+            if torrent_file.filename == '':
+                return jsonify({'error': 'Empty torrent filename'}), 400
+                
+            if not torrent_file.filename.endswith('.torrent'):
+                return jsonify({'error': 'File must be a .torrent file'}), 400
+            
+            # Generate a simple numbered filename
+            counter = torrent_manager.blockchain_counter
+            torrent_manager.blockchain_counter += 1
+            torrent_filename = f"manual_upload_{counter}.torrent"
+            torrent_path = os.path.join(torrent_manager.temp_dir, torrent_filename)
+            
+            # Save the torrent file
+            torrent_file.save(torrent_path)
+            logger.info(f"Manually uploaded torrent saved to: {torrent_path}")
+            
+            # Get torrent info for response
+            torrent_info = torrent_manager.get_torrent_info(torrent_path)
+            
+            return jsonify({
+                'success': True,
+                'message': 'Torrent file uploaded successfully. The seeder will detect and start seeding it automatically.',
+                'torrent_path': torrent_path,
+                'torrent_info': torrent_info
+            }), 201
+        except Exception as e:
+            logger.error(f"Error uploading torrent file: {str(e)}")
+            return jsonify({'error': str(e)}), 500
+    
+    @app.route('/chain/torrent/create-empty', methods=['POST'])
+    def create_empty_torrent():
+        """Create an empty torrent file with specified data for manual seeding"""
+        logger.info("Creating empty torrent for manual seeding")
+        
+        try:
+            data = request.get_json()
+            if not data:
+                return jsonify({'error': 'No JSON data provided'}), 400
+            
+            # Get custom name if provided
+            name = data.get('name', f"manual_data_{torrent_manager.blockchain_counter}")
+            
+            # Create a simple JSON data file
+            counter = torrent_manager.blockchain_counter
+            torrent_manager.blockchain_counter += 1
+            
+            # Save the data to a file
+            data_filename = f"manual_data_{counter}.json"
+            data_path = os.path.join(torrent_manager.temp_dir, data_filename)
+            
+            with open(data_path, 'w') as f:
+                json.dump(data, f, indent=2)
+                
+            logger.info(f"Created manual data file: {data_path}")
+            
+            # Create a torrent file from the data
+            torrent_path = os.path.join(torrent_manager.temp_dir, f"manual_data_{counter}.torrent")
+            
+            # Create the torrent
+            torrent = Torrent.create_from(data_path)
+            
+            # Set tracker
+            host_ip = os.getenv('HOST_IP', '127.0.0.1')
+            torrent.announce_urls = [f"http://{host_ip}:6969/announce"]
+            torrent.comment = f"Manual blockchain data: {name}"
+            torrent.created_by = f"Blockchain Node {node_id} - Manual Upload"
+            
+            # Save the torrent file
+            torrent.to_file(torrent_path)
+            
+            logger.info(f"Created manual torrent file: {torrent_path}")
+            
+            return jsonify({
+                'success': True,
+                'message': 'Empty torrent created successfully. The seeder will detect and start seeding it automatically.',
+                'data_path': data_path,
+                'torrent_path': torrent_path,
+                'info_hash': torrent.info_hash
+            }), 201
+            
+        except Exception as e:
+            logger.error(f"Error creating empty torrent: {str(e)}")
+            return jsonify({'error': str(e)}), 500
+    
+    @app.route('/chain/torrent/seed-status', methods=['GET'])
+    def get_seed_status():
+        """Get status of currently seeded torrents"""
+        logger.info("Getting seed status")
+        
+        try:
+            # List torrent files in the data directory
+            torrent_files = torrent_manager.list_torrent_files()
+            data_files = torrent_manager.list_data_files()
+            
+            # Also check if the tracker is alive
+            try:
+                host_ip = os.getenv('HOST_IP', '127.0.0.1')
+                tracker_url = f"http://{host_ip}:6969/stats"
+                tracker_response = requests.get(tracker_url, timeout=2)
+                tracker_status = tracker_response.json() if tracker_response.status_code == 200 else "Unavailable"
+            except:
+                tracker_status = "Unavailable"
+            
+            return jsonify({
+                'success': True,
+                'tracker_status': tracker_status,
+                'torrent_files': torrent_files,
+                'data_files': data_files,
+                'blockchain_data_dir': torrent_manager.temp_dir
+            }), 200
+            
+        except Exception as e:
+            logger.error(f"Error getting seed status: {str(e)}")
+            return jsonify({'error': str(e)}), 500
+
     return app
