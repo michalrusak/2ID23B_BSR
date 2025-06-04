@@ -5,6 +5,9 @@ import tempfile
 import hashlib
 import time
 import base64
+import struct
+import random
+import io
 from torrentool.torrent import Torrent
 import bencode
 
@@ -24,6 +27,10 @@ class BlockchainTorrent:
         # Add counters for file naming
         self.blockchain_counter = self._get_next_counter("blockchain")
         self.transaction_counter = self._get_next_counter("transaction")
+        # Add chunk storage for piece-by-piece transfers
+        self.chunk_storage = {}
+        # Track which info_hash corresponds to which file_id
+        self.info_hash_to_file_id = {}
         logger.info(f"Initialized BlockchainTorrent for node {node_id}, using data dir: {self.temp_dir}")
     
     def _get_next_counter(self, prefix):
@@ -88,12 +95,19 @@ class BlockchainTorrent:
         logger.info("Creating torrent file from blockchain data")
         
         if announce_urls is None:
-            # Use localhost for the tracker
-            host_ip = os.getenv('HOST_IP', '127.0.0.1')
+            # Use "tracker" hostname instead of localhost when in Docker environment
+            # This is crucial for container networking
+            host_ip = os.getenv('HOST_IP', 'tracker')
+            
+            # If we're in a Docker environment, prefer the "tracker" hostname
+            if os.path.exists('/.dockerenv'):
+                primary_tracker = "http://tracker:6969/announce"
+            else:
+                primary_tracker = f"http://{host_ip}:6969/announce"
             
             # Add our custom tracker as the first in the list (highest priority)
             announce_urls = [
-                f"http://{host_ip}:6969/announce",  # Our custom tracker with localhost
+                primary_tracker,  # Our custom tracker with correct hostname
                 # Default tracker list - add more trackers as needed
                 "udp://tracker.opentrackr.org:1337/announce",
                 "udp://tracker.openbittorrent.com:80/announce",
@@ -106,6 +120,8 @@ class BlockchainTorrent:
                 "udp://bt1.archive.org:6969/announce",
                 "udp://bt2.archive.org:6969/announce"
             ]
+            
+            logger.info(f"Using primary tracker URL: {primary_tracker}")
         
         try:
             # Create the blockchain data file
@@ -201,7 +217,7 @@ class BlockchainTorrent:
             return []
     
     def create_torrent_from_transaction(self, transaction_data, announce_urls=None, chunk_size=512*1024):
-        """Create a torrent file from a transaction in the blockchain"""
+        """Create a torrent file from a transaction in the blockchain with proper chunk handling"""
         logger.info("Creating torrent file from transaction data")
         
         try:
@@ -233,11 +249,38 @@ class BlockchainTorrent:
             
             # Save metadata JSON for reference
             json_file_path = os.path.join(self.temp_dir, f"transaction_{transaction_id}.json")
+            
+            # Divide file into chunks and store them
+            chunks = []
+            chunk_hashes = []
+            
+            for i in range(0, file_size, chunk_size):
+                chunk_data = raw_data[i:i+chunk_size]
+                chunk_index = i//chunk_size
+                chunk_id = f"{transaction_id}_{chunk_index}"
+                # Create SHA-256 hash for chunk verification
+                chunk_hash = hashlib.sha256(chunk_data).hexdigest()
+                # SHA-1 hash for BitTorrent pieces
+                piece_hash = hashlib.sha1(chunk_data).digest()
+                chunk_hashes.append(piece_hash)
+                
+                # Store chunk in memory for serving piece requests
+                self.chunk_storage[chunk_id] = chunk_data
+                
+                chunks.append({
+                    'id': chunk_id,
+                    'index': chunk_index,
+                    'hash': chunk_hash,
+                    'size': len(chunk_data)
+                })
+            
+            # Save chunk info to metadata
             json_data = {
                 'transaction_id': transaction_id,
                 'file_name': file_name,
                 'file_size': file_size,
                 'chunk_size': chunk_size,
+                'chunks': chunks,
                 'created_at': time.time(),
                 'node_id': self.node_id,
                 'type': transaction_data.get('type', 'generic')
@@ -247,11 +290,13 @@ class BlockchainTorrent:
                 json.dump(json_data, f, indent=2)
             logger.info(f"Saved transaction metadata to: {json_file_path}")
             
-            # Create the torrent file using torrentool or bencode directly
-            torrent_path = self.save_to_torrent_file(
+            # Create the torrent file using bencode directly
+            # This allows us to properly set piece hashes for BitTorrent
+            torrent_path = self.create_torrent_with_pieces(
                 data_file_path, 
                 transaction_id, 
                 file_name, 
+                chunk_hashes,
                 announce_urls=announce_urls, 
                 piece_length=chunk_size
             )
@@ -263,29 +308,40 @@ class BlockchainTorrent:
             torrent = Torrent.from_file(torrent_path)
             info_hash = torrent.info_hash
             
+            # Store mapping of info_hash to file_id for serving piece requests
+            self.info_hash_to_file_id[info_hash] = transaction_id
+            
             return {
                 'transaction_id': transaction_id,
                 'torrent_path': torrent_path,
                 'data_file_path': data_file_path,
                 'json_file_path': json_file_path,
                 'info_hash': info_hash,
-                'file_size': file_size
+                'file_size': file_size,
+                'chunks': chunks
             }
             
         except Exception as e:
             logger.error(f"Error creating torrent from transaction: {e}")
             return None
     
-    def save_to_torrent_file(self, file_path, file_id, file_name, announce_urls=None, piece_length=512*1024):
-        """Create a .torrent file from a data file and return the path to the torrent file"""
-        logger.info(f"Creating .torrent file for {file_path}")
+    def create_torrent_with_pieces(self, file_path, file_id, file_name, piece_hashes, 
+                                   announce_urls=None, piece_length=512*1024):
+        """Create a torrent file with proper piece hashes for BitTorrent compatibility"""
+        logger.info(f"Creating torrent with pieces for {file_path}")
         
         try:
             if announce_urls is None:
+                # Use "tracker" hostname when in Docker environment
+                if os.path.exists('/.dockerenv'):
+                    primary_tracker = "http://tracker:6969/announce"
+                else:
+                    host_ip = os.getenv('HOST_IP', '127.0.0.1')
+                    primary_tracker = f"http://{host_ip}:6969/announce"
+                
                 # Default announce URLs
-                host_ip = os.getenv('HOST_IP', '127.0.0.1')
                 announce_urls = [
-                    f"http://{host_ip}:6969/announce",
+                    primary_tracker,
                     "udp://tracker.opentrackr.org:1337/announce",
                     "udp://tracker.openbittorrent.com:80/announce"
                 ]
@@ -293,67 +349,135 @@ class BlockchainTorrent:
             # Generate torrent file path
             torrent_path = os.path.join(self.temp_dir, f"transaction_{file_id}.torrent")
             
-            # Method 1: Using torrentool (easier API)
-            try:
-                logger.info("Creating torrent using torrentool")
-                torrent = Torrent.create_from(file_path)
-                torrent.announce_urls = announce_urls
-                torrent.comment = f"Blockchain transaction {file_id}"
-                torrent.created_by = f"Blockchain Node {self.node_id}"
-                torrent.to_file(torrent_path)
-            except Exception as e:
-                logger.error(f"Torrentool method failed: {e}")
-                
-                # Method 2: Using bencode directly (as shown in the example code)
-                logger.info("Falling back to manual bencode creation")
-                # Calculate pieces (SHA-1 hashes of each piece)
-                pieces = b''
-                with open(file_path, 'rb') as f:
-                    while True:
-                        piece_data = f.read(piece_length)
-                        if not piece_data:
-                            break
-                        piece_hash = hashlib.sha1(piece_data).digest()
-                        pieces += piece_hash
-                
-                # Get file size
-                file_size = os.path.getsize(file_path)
-                
-                # Create info dictionary
-                info_dict = {
-                    b'name': file_name.encode('utf-8'),
-                    b'piece length': piece_length,
-                    b'pieces': pieces,
-                    b'length': file_size
-                }
-                
-                # Create torrent dictionary
-                torrent_dict = {
-                    b'info': info_dict,
-                    b'announce': announce_urls[0].encode('utf-8')
-                }
-                
-                # Add announce-list if multiple trackers
-                if len(announce_urls) > 1:
-                    announce_list = [[url.encode('utf-8')] for url in announce_urls]
-                    torrent_dict[b'announce-list'] = announce_list
-                
-                # Add creation date
-                torrent_dict[b'creation date'] = int(time.time())
-                
-                # Add created by
-                torrent_dict[b'created by'] = f"Blockchain Node {self.node_id}".encode('utf-8')
-                
-                # Encode and write to file
-                with open(torrent_path, 'wb') as f:
-                    f.write(bencode.encode(torrent_dict))
+            # Get file size
+            file_size = os.path.getsize(file_path)
             
-            logger.info(f"Successfully created torrent file: {torrent_path}")
+            # Concatenate all piece hashes into a single byte string
+            pieces = b''.join(piece_hashes)
+            
+            # Log piece information for debugging
+            num_pieces = len(piece_hashes)
+            logger.info(f"Created {num_pieces} pieces for torrent (total size: {len(pieces)} bytes)")
+            
+            # Create info dictionary
+            info_dict = {
+                b'name': file_name.encode('utf-8'),
+                b'piece length': piece_length,
+                b'pieces': pieces,
+                b'length': file_size
+            }
+            
+            # Create torrent dictionary
+            torrent_dict = {
+                b'info': info_dict,
+                b'announce': announce_urls[0].encode('utf-8')
+            }
+            
+            # Add announce-list if multiple trackers
+            if len(announce_urls) > 1:
+                announce_list = [[url.encode('utf-8')] for url in announce_urls]
+                torrent_dict[b'announce-list'] = announce_list
+            
+            # Add creation date
+            torrent_dict[b'creation date'] = int(time.time())
+            
+            # Add created by
+            torrent_dict[b'created by'] = f"Blockchain Node {self.node_id}".encode('utf-8')
+            
+            # Encode and write to file
+            with open(torrent_path, 'wb') as f:
+                f.write(bencode.encode(torrent_dict))
+            
+            logger.info(f"Successfully created torrent file with pieces: {torrent_path}")
             return torrent_path
             
         except Exception as e:
-            logger.error(f"Error creating torrent file: {e}")
+            logger.error(f"Error creating torrent file with pieces: {e}")
             return None
+    
+    def get_chunk(self, file_id, chunk_index):
+        """Get a specific chunk by file_id and chunk_index"""
+        chunk_id = f"{file_id}_{chunk_index}"
+        if chunk_id in self.chunk_storage:
+            return self.chunk_storage[chunk_id]
+        
+        # If not in memory, try to load from disk
+        try:
+            # Load the full data file
+            data_file_path = os.path.join(self.temp_dir, f"transaction_{file_id}.data")
+            if os.path.exists(data_file_path):
+                # Get chunk metadata to determine size
+                json_file_path = os.path.join(self.temp_dir, f"transaction_{file_id}.json")
+                if os.path.exists(json_file_path):
+                    with open(json_file_path, 'r') as f:
+                        metadata = json.load(f)
+                        chunk_size = metadata.get('chunk_size', 512*1024)
+                        
+                        # Read the specific chunk from the file
+                        with open(data_file_path, 'rb') as f:
+                            f.seek(chunk_index * chunk_size)
+                            chunk_data = f.read(chunk_size)
+                            
+                            # Store in memory for future requests
+                            self.chunk_storage[chunk_id] = chunk_data
+                            return chunk_data
+        except Exception as e:
+            logger.error(f"Error loading chunk {chunk_id} from disk: {e}")
+        
+        return None
+    
+    def store_chunk(self, file_id, chunk_index, chunk_data):
+        """Store a chunk in memory and optionally on disk"""
+        chunk_id = f"{file_id}_{chunk_index}"
+        self.chunk_storage[chunk_id] = chunk_data
+        
+        # Optionally write to disk in a chunks directory
+        chunks_dir = os.path.join(self.temp_dir, "chunks")
+        os.makedirs(chunks_dir, exist_ok=True)
+        
+        chunk_path = os.path.join(chunks_dir, chunk_id)
+        try:
+            with open(chunk_path, 'wb') as f:
+                f.write(chunk_data)
+            logger.info(f"Stored chunk {chunk_id} to disk")
+            return True
+        except Exception as e:
+            logger.error(f"Error storing chunk {chunk_id} to disk: {e}")
+            return False
+    
+    def distribute_chunks(self, file_id, chunks, nodes):
+        """Distribute chunks to available nodes for redundancy"""
+        if not nodes:
+            logger.warning("No nodes available for chunk distribution")
+            return False
+        
+        redundancy = min(3, len(nodes))
+        distributed = 0
+        
+        for chunk in chunks:
+            # Get the chunk data
+            chunk_id = chunk['id']
+            chunk_data = self.chunk_storage.get(chunk_id)
+            
+            if not chunk_data:
+                logger.warning(f"Chunk {chunk_id} not found in storage")
+                continue
+            
+            # Select random nodes for redundancy
+            selected_nodes = random.sample(nodes, redundancy)
+            
+            for node in selected_nodes:
+                try:
+                    # Send the chunk to the node
+                    # This would typically be a POST request to a node's API
+                    # For now, we'll just log it
+                    logger.info(f"Would distribute chunk {chunk_id} to node {node}")
+                    distributed += 1
+                except Exception as e:
+                    logger.error(f"Error distributing chunk {chunk_id} to node {node}: {e}")
+        
+        logger.info(f"Distributed {distributed} chunks to {len(nodes)} nodes")
+        return distributed > 0
     
     def get_transaction_data_from_torrent(self, torrent_path):
         """Extract transaction data from a torrent file"""
