@@ -1,0 +1,56 @@
+{
+	"network": {
+		"nodes": [
+			{
+				"id": "node1",
+				"host": "localhost",
+				"apiPort": 3001,
+				"p2pPort": 6001
+			},
+			{
+				"id": "node2",
+				"host": "localhost",
+				"apiPort": 3002,
+				"p2pPort": 6002
+			},
+			{
+				"id": "node3",
+				"host": "localhost",
+				"apiPort": 3003,
+				"p2pPort": 6003
+			},
+			{
+				"id": "node4",
+				"host": "localhost",
+				"apiPort": 3004,
+				"p2pPort": 6004
+			},
+			{
+				"id": "node5",
+				"host": "localhost",
+				"apiPort": 3005,
+				"p2pPort": 6005
+			},
+			{
+				"id": "node6",
+				"host": "localhost",
+				"apiPort": 3006,
+				"p2pPort": 6006
+			}
+		],
+		"consensusThreshold": 4
+	},
+	"tracker": {
+		"port": 8000,
+		"announce": ["http://localhost:8000/announce"]
+	},
+	"storage": {
+		"imagesPath": "./data/images",
+		"torrentsPath": "./data/torrents",
+		"temporaryPath": "./data/temp"
+	},
+	"api": {
+		"port": 3000,
+		"maxFileSize": 10485760
+	}
+}
