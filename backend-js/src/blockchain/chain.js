@@ -1,115 +1,195 @@
-const Block = require('./block')
-const config = require('config')
+const Block = require("./block");
+const Transaction = require("./transaction");
+const axios = require("axios");
 
-class Blockchain {
-	constructor() {
-		this.chain = [this.createGenesisBlock()]
-		this.pendingBlocks = [] // Zmieniono z pendingTransactions na pendingBlocks
-		this.difficulty = 1 // Zmieniono z 4 na 1
-		this.nodes = new Set() // Zbiór węzłów w sieci
-	}
+class BlockchainNode {
+  constructor(nodeId, nodes = [], difficulty = 2) {
+    this.nodeId = nodeId;
+    this.chain = [this.createGenesisBlock()];
+    this.difficulty = difficulty;
+    this.pendingTransactions = [];
+    this.nodes = nodes;
+    this.miningStatus = { isMining: false, progress: 0 };
+  }
 
-	createGenesisBlock() {
-		return new Block(0, 0, { message: 'Blockchain Image Storage Genesis Block' }, '0') // Użyto stałego znacznika czasu 0
-	}
+  createGenesisBlock() {
+    return new Block(0, "0", [new Transaction("Genesis Block")]);
+  }
 
-	getLatestBlock() {
-		return this.chain[this.chain.length - 1]
-	}
+  getLatestBlock() {
+    return this.chain[this.chain.length - 1];
+  }
 
-	// Dodanie nowego bloku do oczekujących na konsensus
-	addPendingBlock(data) {
-		const block = new Block(this.chain.length, Date.now(), data, this.getLatestBlock().hash)
-		console.log(`[Blockchain] Starting to mine block ${block.timestamp} for imageId: ${data.imageId}...`) // Dodatkowe logowanie
-		block.mineBlock(this.difficulty)
-		console.log(`[Blockchain] Finished mining block ${block.hash} for imageId: ${data.imageId}.`) // Dodatkowe logowanie
-		this.pendingBlocks.push(block)
-		return block
-	}
+  addTransaction(transaction) {
+    if (!transaction.verifyCRC())
+      throw new Error("Transaction CRC verification failed");
+    this.pendingTransactions.push(transaction);
+  }
 
-	// Dodanie głosu na blok
-	voteOnBlock(blockHash, nodeId, isValid) {
-		const blockIndex = this.pendingBlocks.findIndex(b => b.hash === blockHash)
-		if (blockIndex === -1) return false
+  async broadcastTransaction(transaction) {
+    let confirmations = 1; // self
+    for (const node of this.nodes) {
+      try {
+        const res = await axios.post(
+          `${node}/blockchain/verify_transaction`,
+          transaction.toDict()
+        );
+        if (res.status === 200) confirmations++;
+      } catch {}
+    }
+    transaction.confirmations.add(this.nodeId);
+    return confirmations >= Math.ceil((this.nodes.length + 1) / 2);
+  }
 
-		const block = this.pendingBlocks[blockIndex]
-		const voteAdded = block.addVote(nodeId, isValid)
+  verifyTransaction(transactionData) {
+    const tx = Transaction.fromDict(transactionData);
+    if (tx.verifyCRC()) {
+      tx.confirmations.add(this.nodeId);
+      this.addTransaction(tx);
+      return true;
+    }
+    return false;
+  }
 
-		// Sprawdzenie, czy osiągnięto konsensus
-		if (block.hasReachedConsensus(this.consensusThreshold)) {
-			this.chain.push(block)
-			this.pendingBlocks.splice(blockIndex, 1)
-			return { added: true, consensus: true }
-		}
+  async processImage(imageBuffer) {
+    const tx = new Transaction(imageBuffer, "image");
+    if (!tx.verifyCRC())
+      return { success: false, error: "CRC verification failed" };
+    const ok = await this.broadcastTransaction(tx);
+    if (!ok) return { success: false, error: "Consensus failed" };
+    if (!this.pendingTransactions.includes(tx)) this.addTransaction(tx);
+    const miningResult = await this.minePendingTransactions();
+    return {
+      success: true,
+      initial_crc: tx.crc,
+      final_crc: tx.crc,
+      confirmations: tx.confirmations.size,
+      mining_status: miningResult.status,
+      mining_message: miningResult.message,
+    };
+  }
 
-		return { added: voteAdded, consensus: false }
-	}
+  verifyBlock(block) {
+    if (block.index === 0) {
+      if (block.previousHash !== "0") return false;
+      return block.transactions.every((tx) => tx.verifyCRC());
+    }
+    if (
+      block.hash.substring(0, this.difficulty) !== "0".repeat(this.difficulty)
+    )
+      return false;
+    if (!block.transactions.every((tx) => tx.verifyCRC())) return false;
+    return true;
+  }
 
-	// Sprawdzenie, czy blok jest ważny do dodania do łańcucha
-	isValidNewBlock(block, latestBlock) {
-		// console.log('Validating new block:', block);
-		// console.log('Against latest block:', latestBlock);
+  async minePendingTransactions() {
+    if (!this.pendingTransactions.length)
+      return {
+        success: false,
+        message: "No pending transactions",
+        status: "idle",
+      };
+    this.miningStatus.isMining = true;
+    const validTxs = this.pendingTransactions.filter(
+      (tx) => tx.confirmations.size >= Math.ceil((this.nodes.length + 1) / 2)
+    );
+    if (!validTxs.length)
+      return {
+        success: false,
+        message: "No transactions with sufficient confirmations",
+        status: "waiting_for_confirmations",
+      };
+    const block = new Block(
+      this.chain.length,
+      this.getLatestBlock().hash,
+      validTxs
+    );
+    block.mineBlock(this.difficulty);
+    // Broadcast mined block
+    let confirmations = 1;
+    for (const node of this.nodes) {
+      try {
+        const res = await axios.post(`${node}/blockchain/verify_mined_block`, {
+          index: block.index,
+          previousHash: block.previousHash,
+          timestamp: block.timestamp,
+          transactions: block.transactions.map((tx) => tx.toDict()),
+          hash: block.hash,
+          nonce: block.nonce,
+        });
+        if (res.status === 200) confirmations++;
+      } catch {}
+    }
+    if (confirmations < Math.ceil((this.nodes.length + 1) / 2)) {
+      return {
+        success: false,
+        message: "Consensus failed",
+        status: "consensus_failed",
+      };
+    }
+    this.chain.push(block);
+    this.pendingTransactions = this.pendingTransactions.filter(
+      (tx) => !validTxs.includes(tx)
+    );
+    this.miningStatus.isMining = false;
+    return {
+      success: true,
+      message: "Block mined and confirmed",
+      status: "completed",
+      block: {
+        index: block.index,
+        hash: block.hash,
+        transaction_count: block.transactions.length,
+      },
+    };
+  }
 
-		// Przed walidacją hasha i danych, utwórz nową instancję Block
-		// aby upewnić się, że mamy dostęp do metod prototypu.
-		// Zakładamy, że 'block' to obiekt z danymi, który przyszedł przez sieć.
-		const tempBlock = new Block(block.index, block.timestamp, block.data, block.previousHash)
-		// Skopiuj nonce i hash z oryginalnego obiektu bloku,
-		// ponieważ są one wynikiem miningu/konsensusu i nie są ustawiane w konstruktorze w ten sam sposób,
-		// lub mogły zostać nadpisane przez calculateHash() w konstruktorze Block, jeśli dane są identyczne.
-		tempBlock.nonce = block.nonce
-		tempBlock.hash = block.hash // Ważne: używamy oryginalnego hasha do porównania z obliczonym i do walidacji.
+  async initialSync() {
+    let longestChain = this.chain;
+    for (const node of this.nodes) {
+      try {
+        const res = await axios.get(`${node}/blockchain/chain`);
+        if (res.status === 200 && res.data.length > longestChain.length) {
+          const chain = this.reconstructChain(res.data.chain);
+          if (chain && this.isChainValid(chain)) longestChain = chain;
+        }
+      } catch {}
+    }
+    this.chain = longestChain;
+  }
 
-		if (tempBlock.index !== latestBlock.index + 1) {
-			console.log(`Invalid index: expected ${latestBlock.index + 1}, got ${tempBlock.index}`)
-			return false
-		}
+  reconstructChain(chainData) {
+    return chainData.map((blockData) => {
+      const txs = blockData.transactions.map(Transaction.fromDict);
+      const block = new Block(
+        blockData.index,
+        blockData.previousHash,
+        txs,
+        blockData.timestamp
+      );
+      block.hash = blockData.hash;
+      block.nonce = blockData.nonce;
+      return block;
+    });
+  }
 
-		if (tempBlock.previousHash !== latestBlock.hash) {
-			console.log(`Invalid previous hash: expected ${latestBlock.hash}, got ${tempBlock.previousHash}`)
-			return false
-		}
+  isChainValid(chain) {
+    for (let i = 1; i < chain.length; i++) {
+      const curr = chain[i],
+        prev = chain[i - 1];
+      if (curr.hash !== curr.calculateHash()) return false;
+      if (curr.previousHash !== prev.hash) return false;
+      if (
+        curr.hash.substring(0, this.difficulty) !== "0".repeat(this.difficulty)
+      )
+        return false;
+      if (!curr.transactions.every((tx) => tx.verifyCRC())) return false;
+    }
+    return true;
+  }
 
-		// Użyj tempBlock do walidacji, ponieważ ma on metody prototypu
-		const calculatedHash = tempBlock.calculateHash() // Oblicz hash na podstawie danych tempBlock (w tym nonce)
-		if (tempBlock.hash !== calculatedHash) {
-			console.log('Invalid hash: received', tempBlock.hash, 'calculated', calculatedHash)
-			console.log('Block data used for calculation:', {
-				index: tempBlock.index,
-				timestamp: tempBlock.timestamp,
-				data: tempBlock.data,
-				previousHash: tempBlock.previousHash,
-				nonce: tempBlock.nonce,
-			})
-			return false
-		}
-
-		if (!tempBlock.validateData()) {
-			// Użyj tempBlock
-			console.log('Invalid data in new block')
-			return false
-		}
-
-		return true
-	}
-
-	// Sprawdzenie całego łańcucha
-	isChainValid() {
-		for (let i = 1; i < this.chain.length; i++) {
-			const currentBlock = this.chain[i]
-			const previousBlock = this.chain[i - 1]
-
-			if (!currentBlock.isValid(previousBlock.hash)) {
-				return false
-			}
-		}
-		return true
-	}
-
-	// Znalezienie bloku zawierającego konkretne dane (np. po identyfikatorze obrazu)
-	findBlockByImageId(imageId) {
-		return this.chain.find(block => block.data.imageId === imageId)
-	}
+  // ...implement verify_and_correct_hashes, start_hash_verification, verify_and_correct_data, synchronizeNode, resolve_conflicts as needed...
 }
 
-module.exports = Blockchain
+module.exports = BlockchainNode;
+

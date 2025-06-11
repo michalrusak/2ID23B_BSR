@@ -1,78 +1,36 @@
-const crypto = require('crypto-js')
-const { calculateCRC } = require('../storage/crc-validator')
+const crypto = require("crypto");
 
 class Block {
-	constructor(index, timestamp, data, previousHash = '') {
-		this.index = index
-		this.timestamp = timestamp
-		this.data = data
-		this.previousHash = previousHash
-		this.hash = this.calculateHash()
-		this.nonce = 0
-		this.votes = [] // Lista głosów od węzłów
-	}
+  constructor(index, previousHash, transactions, timestamp = Date.now()) {
+    this.index = index;
+    this.previousHash = previousHash;
+    this.transactions = transactions;
+    this.timestamp = timestamp;
+    this.nonce = 0;
+    this.hash = this.calculateHash();
+  }
 
-	calculateHash() {
-		return crypto
-			.SHA256(this.index + this.timestamp + JSON.stringify(this.data) + this.previousHash + this.nonce)
-			.toString()
-	}
+  calculateHash() {
+    return crypto
+      .createHash("sha256")
+      .update(
+        this.index +
+          this.previousHash +
+          JSON.stringify(this.transactions.map((tx) => tx.toDict())) +
+          this.timestamp +
+          this.nonce
+      )
+      .digest("hex");
+  }
 
-	// Prosta implementacja Proof of Work
-	mineBlock(difficulty) {
-		while (this.hash.substring(0, difficulty) !== Array(difficulty + 1).join('0')) {
-			this.nonce++
-			this.hash = this.calculateHash()
-		}
-		console.log(`Block mined: ${this.hash}`)
-	}
-
-	// Dodanie głosu od węzła
-	addVote(nodeId, isValid) {
-		// Sprawdzenie, czy węzeł już głosował
-		if (!this.votes.some(vote => vote.nodeId === nodeId)) {
-			this.votes.push({ nodeId, isValid })
-			return true
-		}
-		return false
-	}
-
-	// Sprawdzenie, czy blok osiągnął konsensus
-	hasReachedConsensus(threshold) {
-		const validVotes = this.votes.filter(vote => vote.isValid).length
-		return validVotes >= threshold
-	}
-
-	// Weryfikacja integralności danych bloku
-	validateData() {
-		// Jeśli dane zawierają obraz, sprawdź sumę kontrolną
-		if (this.data.imageData) {
-			const storedCRC = this.data.crc
-			const calculatedCRC = calculateCRC(this.data.imageData)
-			return storedCRC === calculatedCRC
-		}
-		return true
-	}
-
-	// Weryfikacja całego bloku
-	isValid(previousHash) {
-		// Sprawdzenie hash poprzedniego bloku
-		if (this.previousHash !== previousHash) {
-			return false
-		}
-
-		// Sprawdzenie własnego hash
-		if (this.hash !== this.calculateHash()) {
-			return false
-		}
-
-		// Sprawdzenie integralności danych
-		if (!this.validateData()) {
-			return false
-		}
-
-		return true
-	}
+  mineBlock(difficulty) {
+    const target = Array(difficulty + 1).join("0");
+    while (this.hash.substring(0, difficulty) !== target) {
+      this.nonce++;
+      this.hash = this.calculateHash();
+    }
+  }
 }
 
-module.exports = Block
+module.exports = Block;
+
