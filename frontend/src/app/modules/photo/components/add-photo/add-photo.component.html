@@ -33,6 +33,74 @@
     </ng-container>
   </div>
 
+  <!-- Torrent Download Section -->
+  <div class="torrent-container">
+    <h2>Blockchain Torrent Download</h2>
+
+    <div class="torrent-actions">
+      <button class="torrent-button" (click)="downloadTorrentFile()">
+        <i class="fa fa-download"></i> Download Blockchain Torrent
+      </button>
+
+      <button class="torrent-button" (click)="downloadBlockchainData()">
+        <i class="fa fa-file-code"></i> Download Blockchain Data
+      </button>
+
+      <button class="torrent-button" (click)="fetchTorrentInfo()">
+        <i class="fa fa-refresh"></i> Refresh Torrent Info
+      </button>
+    </div>
+
+    <div *ngIf="torrentDownloadError" class="error-message">
+      {{ torrentDownloadError }}
+    </div>
+
+    <div *ngIf="isLoadingTorrentInfo" class="loading-spinner">
+      Loading torrent information...
+    </div>
+
+    <div *ngIf="torrentInfo" class="torrent-info">
+      <h3>Torrent Information</h3>
+      <table>
+        <tr>
+          <td><strong>Info Hash:</strong></td>
+          <td>{{ torrentInfo.info_hash }}</td>
+        </tr>
+        <tr>
+          <td><strong>Name:</strong></td>
+          <td>{{ torrentInfo.name }}</td>
+        </tr>
+        <tr>
+          <td><strong>Size:</strong></td>
+          <td>{{ torrentInfo.size | number }} bytes</td>
+        </tr>
+        <tr>
+          <td><strong>Created By:</strong></td>
+          <td>{{ torrentInfo.created_by }}</td>
+        </tr>
+        <tr>
+          <td><strong>Comment:</strong></td>
+          <td>{{ torrentInfo.comment }}</td>
+        </tr>
+      </table>
+
+      <div class="tracker-list">
+        <h4>Trackers:</h4>
+        <ul>
+          <li *ngFor="let tracker of torrentInfo.announce_urls">{{ tracker }}</li>
+        </ul>
+      </div>
+
+      <div class="torrent-help">
+        <p>
+          <i class="fa fa-info-circle"></i>
+          Download the torrent file and open it with your BitTorrent client (uTorrent, BitTorrent, qBittorrent, etc.)
+          to download the blockchain data.
+        </p>
+      </div>
+    </div>
+  </div>
+
   <div class="node-list-container">
     <h3>Nodes</h3>
     <ul class="node-list">

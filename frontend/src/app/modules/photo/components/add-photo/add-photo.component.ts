@@ -1,6 +1,9 @@
-import { Component, OnDestroy } from '@angular/core';
+import { Component, OnDestroy, OnInit } from '@angular/core';
 import { Subject, takeUntil } from 'rxjs';
-import { PhotoService } from 'src/app/modules/core/services/photo.service';
+import {
+  PhotoService,
+  TorrentInfo,
+} from 'src/app/modules/core/services/photo.service';
 import { PhotoStateService } from 'src/app/modules/core/services/photo.state';
 import { HttpClient } from '@angular/common/http';
 
@@ -9,10 +12,13 @@ import { HttpClient } from '@angular/common/http';
   templateUrl: './add-photo.component.html',
   styleUrls: ['./add-photo.component.scss'],
 })
-export class AddPhotoComponent implements OnDestroy {
+export class AddPhotoComponent implements OnInit, OnDestroy {
   private destroy$ = new Subject<void>();
   state$ = this.photoState.getState();
   chain: any[] = [];
+  torrentInfo: TorrentInfo | null = null;
+  isLoadingTorrentInfo = false;
+  torrentDownloadError: string | null = null;
 
   nodes = [
     { id: 1, name: 'Node 1', active: true },
@@ -68,6 +74,7 @@ export class AddPhotoComponent implements OnDestroy {
 
   ngOnInit() {
     this.fetchChain();
+    this.fetchTorrentInfo();
   }
 
   fetchChain() {
@@ -76,6 +83,68 @@ export class AddPhotoComponent implements OnDestroy {
       .pipe(takeUntil(this.destroy$))
       .subscribe((data) => {
         this.chain = data.chain;
+      });
+  }
+
+  fetchTorrentInfo() {
+    this.isLoadingTorrentInfo = true;
+    this.torrentDownloadError = null;
+
+    this.photoService
+      .getTorrentInfo()
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (response) => {
+          this.torrentInfo = response.torrent_info;
+          this.isLoadingTorrentInfo = false;
+        },
+        error: (error) => {
+          console.error('Error fetching torrent info:', error);
+          this.torrentDownloadError = 'Failed to fetch torrent information';
+          this.isLoadingTorrentInfo = false;
+        },
+      });
+  }
+
+  downloadTorrentFile() {
+    this.torrentDownloadError = null;
+
+    this.photoService
+      .getBlockchainTorrent()
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (blob) => {
+          const timestamp = new Date().getTime();
+          this.photoService.downloadFile(
+            blob,
+            `blockchain_${timestamp}.torrent`
+          );
+        },
+        error: (error) => {
+          console.error('Error downloading torrent:', error);
+          this.torrentDownloadError = 'Failed to download torrent file';
+        },
+      });
+  }
+
+  downloadBlockchainData() {
+    this.torrentDownloadError = null;
+
+    this.photoService
+      .getBlockchainDataFile()
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (blob) => {
+          const timestamp = new Date().getTime();
+          this.photoService.downloadFile(
+            blob,
+            `blockchain_data_${timestamp}.json`
+          );
+        },
+        error: (error) => {
+          console.error('Error downloading blockchain data:', error);
+          this.torrentDownloadError = 'Failed to download blockchain data file';
+        },
       });
   }
 

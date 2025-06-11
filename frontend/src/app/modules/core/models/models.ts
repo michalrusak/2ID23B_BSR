@@ -32,3 +32,12 @@ export interface BlockchainResponse {
   chain?: any[];
   length?: number;
 }
+
+export interface TorrentInfo {
+  info_hash: string;
+  name: string;
+  size: number;
+  created_by: string;
+  comment: string;
+  announce_urls: string[];
+}
