@@ -3,7 +3,6 @@ const multer = require("multer");
 const path = require("path");
 const fs = require("fs").promises;
 const config = require("config");
-const imageProcessor = require("../storage/image-processor");
 const torrentCreator = require("../torrent/torrent-creator");
 const TorrentSeeder = require("../torrent/seeder");
 const axios = require("axios");
