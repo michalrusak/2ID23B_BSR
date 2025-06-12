@@ -45,17 +45,25 @@
       </li>
     </ul>
   </div>
-
   <div class="chain-container">
     <h2>Blockchain</h2>
     <div *ngFor="let block of chain" class="block">
       <h3>Block {{ block.index }}</h3>
       <p>Hash: {{ block.hash }}</p>
       <p>Previous Hash: {{ block.previous_hash }}</p>
-      <div *ngFor="let transaction of block.transactions">
+      <div *ngFor="let transaction of block.transactions" class="transaction">
         <p>Type: {{ transaction.type }}</p>
         <ng-container *ngIf="transaction.type === 'image'">
-          <img [src]="'data:image/png;base64,' + transaction.data" alt="Transaction Image" />
+          <img [src]="'data:image/png;base64,' + transaction.data" alt="Transaction Image" class="blockchain-image" />
+          <div class="torrent-actions">
+            <button class="torrent-btn create" (click)="createTorrent('image_' + block.index + '_' + transaction.crc)">
+              Create Torrent
+            </button>
+            <button class="torrent-btn download"
+              (click)="downloadTorrent('image_' + block.index + '_' + transaction.crc + '.torrent')">
+              Download .torrent
+            </button>
+          </div>
         </ng-container>
       </div>
     </div>

@@ -97,13 +97,35 @@ export class AddPhotoComponent implements OnDestroy {
       })
       .subscribe();
   }
-
   simulateDataCorruption(nodeId: number) {
     this.http
       .post(`http://localhost:500${nodeId}/blockchain/simulate/failure`, {
         type: 'data_corruption',
       })
       .subscribe();
+  }
+
+  createTorrent(imageId: string) {
+    this.http
+      .post(`http://localhost:3000/api/create-torrent/${imageId}`, {})
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (response: any) => {
+          console.log('Torrent created:', response);
+          this.photoState.setSuccess(
+            `Torrent created successfully! Download URL: ${response.torrentDownloadUrl}`
+          );
+        },
+        error: (error) => {
+          console.error('Error creating torrent:', error);
+          this.photoState.setError('Failed to create torrent');
+        },
+      });
+  }
+
+  downloadTorrent(filename: string) {
+    const downloadUrl = `http://localhost:3000/api/download/torrent/${filename}`;
+    window.open(downloadUrl, '_blank');
   }
 
   ngOnDestroy() {

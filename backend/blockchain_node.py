@@ -1238,4 +1238,40 @@ def create_blockchain_app():
                 'status': 'error'
             }), 500
 
+    @app.route('/image/data/<path:image_id>', methods=['GET'])
+    def get_image_data(image_id):
+        """Endpoint to get image data for torrent server"""
+        logger.info(f"Getting image data for torrent server, imageId: {image_id}")
+        
+        try:
+            # Przeszukaj blockchain w poszukiwaniu obrazu
+            for block in blockchain.chain:
+                for transaction in block.transactions:
+                    if transaction.type == 'image' and transaction.data:
+                        # Zwróć pierwszy znaleziony obraz lub możesz dodać logikę identyfikacji
+                        # Na razie zwracamy pierwszy znaleziony obraz
+                        image_data = transaction.data
+                        if isinstance(image_data, bytes):
+                            image_data = base64.b64encode(image_data).decode('utf-8')
+                        
+                        return jsonify({
+                            'success': True,
+                            'imageId': image_id,
+                            'imageData': image_data,
+                            'blockIndex': block.index,
+                            'crc': transaction.crc
+                        }), 200
+            
+            return jsonify({
+                'success': False,
+                'message': 'Image not found in blockchain'
+            }), 404
+            
+        except Exception as e:
+            logger.error(f"Error getting image data: {e}")
+            return jsonify({
+                'success': False,
+                'message': str(e)
+            }), 500
+
     return app
