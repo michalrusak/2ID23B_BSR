@@ -1,0 +1,15 @@
+{
+  "tracker": {
+    "port": 8000,
+    "announce": ["http://localhost:8000/announce"]
+  },
+  "storage": {
+    "imagesPath": "./data/images",
+    "torrentsPath": "./data/torrents",
+    "temporaryPath": "./data/temp"
+  },
+  "api": {
+    "port": 3000,
+    "maxFileSize": 10485760
+  }
+}

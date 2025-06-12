@@ -1,0 +1,21 @@
+{
+  "network": {
+    "pythonBackend": {
+      "host": "localhost",
+      "port": 5001,
+      "baseUrl": "http://localhost:5001"
+    }
+  },
+  "tracker": {
+    "port": 8000,
+    "announce": ["http://localhost:8000/announce"]
+  },
+  "storage": {
+    "torrentsPath": "./data/torrents",
+    "temporaryPath": "./data/temp"
+  },
+  "api": {
+    "port": 3000,
+    "maxFileSize": 10485760
+  }
+}
