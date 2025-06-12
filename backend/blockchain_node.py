@@ -142,7 +142,8 @@ class Block:
         logger.info(f"czy tu jestem end minig") 
 
 def generate_node_addresses(start_port, num_nodes):
-    return [f"http://node{i}:{5000 + i}" for i in range(1, num_nodes + 1)]
+    # Generate local addresses instead of Docker container names
+    return [f"http://localhost:{5000 + i}" for i in range(1, num_nodes + 1)]
 
 class BlockchainNode:
     def __init__(self, node_id, start_port=5001, num_nodes=6, difficulty=2):
@@ -150,7 +151,8 @@ class BlockchainNode:
         self.chain = [self.create_genesis_block()]
         self.difficulty = difficulty
         self.pending_transactions = []
-        self.nodes = self.generate_docker_node_addresses(num_nodes)
+        # Use localhost addresses instead of Docker container names
+        self.nodes = self.generate_local_node_addresses(num_nodes)
         self.lock = threading.Lock()
         self.mining_status = {"is_mining": False, "progress": 0}
         self.health_check_interval = 30
@@ -160,6 +162,15 @@ class BlockchainNode:
         self.initial_sync()
         self.start_hash_verification()
         self.start_data_verification()
+
+    def generate_local_node_addresses(self, num_nodes):
+        """Generate local addresses for nodes"""
+        node_addresses = []
+        current_node_port = int(self.node_id.replace('node', ''))
+        for i in range(1, num_nodes + 1):
+            if i != current_node_port:
+                node_addresses.append(f"http://localhost:500{i}")
+        return node_addresses
 
     def start_data_verification(self):
         """Start periodic data verification"""
@@ -545,14 +556,6 @@ class BlockchainNode:
                 extra={'node_id': self.node_id}
             )
             return False
-
-    def generate_docker_node_addresses(self, num_nodes):
-        """Generuje adresy węzłów używając nazw serwisów Docker"""
-        node_addresses = []
-        for i in range(1, num_nodes + 1):
-            if f"node{i}" != self.node_id:
-                node_addresses.append(f"http://node{i}:500{i}")
-        return node_addresses
 
     def broadcast_transaction(self, transaction):
         """Broadcast transaction to other nodes and collect confirmations"""
@@ -1360,8 +1363,8 @@ def create_blockchain_app():
         logger.info("Creating blockchain torrent file for external client")
         
         try:
-            # Always use localhost for local testing
-            host_ip = "127.0.0.1"
+            # Always use localhost for tracker
+            host_ip = "localhost"
             external_tracker = f"http://{host_ip}:6969/announce"
             
             # Use only our custom tracker for external clients

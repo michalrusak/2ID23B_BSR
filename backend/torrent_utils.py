@@ -95,15 +95,11 @@ class BlockchainTorrent:
         logger.info("Creating torrent file from blockchain data")
         
         if announce_urls is None:
-            # Use "tracker" hostname instead of localhost when in Docker environment
-            # This is crucial for container networking
-            host_ip = os.getenv('HOST_IP', 'localhost')
+            # Use localhost for tracker
+            host_ip = "localhost"
             
-            # If we're in a Docker environment, prefer the "tracker" hostname
-            if os.path.exists('/.dockerenv'):
-                primary_tracker = "http://tracker:6969/announce"
-            else:
-                primary_tracker = f"http://{host_ip}:6969/announce"
+            # Always use localhost tracker
+            primary_tracker = f"http://{host_ip}:6969/announce"
             
             # Add our custom tracker as the first in the list (highest priority)
             announce_urls = [
