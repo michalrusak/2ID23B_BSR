@@ -74,84 +74,126 @@ class TorrentSeeder {
     console.log(
       `[TorrentSeeder] Attempting to seed file FROM BLOCKCHAIN. Torrent path: ${torrentFilePath}, ImageID: ${imageId}`
     );
-    try {
-      if (!fs.existsSync(torrentFilePath)) {
-        console.error(
-          `[TorrentSeeder] Torrent file not found at: ${torrentFilePath}`
-        );
-        throw new Error(`Torrent file not found at: ${torrentFilePath}`);
-      }
 
-      const torrentFileBuffer = fs.readFileSync(torrentFilePath);
-      console.log(
-        `[TorrentSeeder] Read torrent file. Path: ${torrentFilePath}, Buffer length: ${torrentFileBuffer.length}`
-      ); // Dodano logowanie rozmiaru bufora
-      const parsedTorrent = await parseTorrent(torrentFileBuffer); // Dodano await
-
-      console.log(`[TorrentSeeder] Parsed torrent object:`, parsedTorrent); // Dodano logowanie całego obiektu parsedTorrent
-
-      // Sprawdzenie, czy parsedTorrent jest zdefiniowany przed próbą dostępu do właściwości
-      if (
-        !parsedTorrent ||
-        !parsedTorrent.length ||
-        !parsedTorrent.pieceLength
-      ) {
-        const errMsg = `[TorrentSeeder] Critical error: Torrent metadata is missing, invalid, or incomplete. Name: ${
-          parsedTorrent ? parsedTorrent.name : "N/A"
-        }, Length: ${
-          parsedTorrent ? parsedTorrent.length : "N/A"
-        }, PieceLength: ${parsedTorrent ? parsedTorrent.pieceLength : "N/A"}`;
-        console.error(errMsg);
-        throw new Error(errMsg);
-      }
-
-      // Utworz klasę magazynu specyficzną dla tego torrent
-      class TorrentSpecificStore extends PythonBlockchainChunkStore {
-        constructor(chunkLength, storeOpts) {
-          console.log(
-            `[TorrentSeeder] TorrentSpecificStore constructor called. chunkLength: ${chunkLength}`
+    return new Promise(async (resolve, reject) => {
+      try {
+        if (!fs.existsSync(torrentFilePath)) {
+          console.error(
+            `[TorrentSeeder] Torrent file not found at: ${torrentFilePath}`
           );
-          console.log(`[TorrentSeeder] storeOpts:`, storeOpts);
-          // Przekaż parametry do nadklasy
-          super(imageId, parsedTorrent.length, chunkLength);
+          return reject(
+            new Error(`Torrent file not found at: ${torrentFilePath}`)
+          );
         }
-      }
 
-      const options = {
-        name: parsedTorrent.name, // Nazwa torrenta
-        announce: parsedTorrent.announce, // Lista trackerów
-        store: TorrentSpecificStore, // Przekaż klasę bezpośrednio
-        // Nie podajemy `path`, ponieważ `store` obsługuje dostarczanie danych
-      };
-
-      console.log(
-        `[TorrentSeeder] Adding torrent to client with TorrentSpecificStore for imageId: ${imageId}`
-      );
-
-      this.client.add(torrentFileBuffer, options, (torrent) => {
+        const torrentFileBuffer = fs.readFileSync(torrentFilePath);
         console.log(
-          `[TorrentSeeder] Client is seeding (from blockchain) ${torrent.files.length} files for torrent: ${torrent.name} (infoHash: ${torrent.infoHash})`
+          `[TorrentSeeder] Read torrent file. Path: ${torrentFilePath}, Buffer length: ${torrentFileBuffer.length}`
+        ); // Dodano logowanie rozmiaru bufora
+        const parsedTorrent = await parseTorrent(torrentFileBuffer); // Dodano await
+
+        console.log(`[TorrentSeeder] Parsed torrent object:`, parsedTorrent); // Dodano logowanie całego obiektu parsedTorrent
+
+        // Check if torrent is already being seeded
+        const existingTorrent = this.client.torrents.find(
+          (t) => t.infoHash === parsedTorrent.infoHash
         );
-        console.log(`[TorrentSeeder] Files being seeded (metadata):`);
-        torrent.files.forEach((file) => {
+        if (existingTorrent) {
           console.log(
-            `  - ${file.name} (path in torrent: ${file.path}, length: ${file.length})`
+            `[TorrentSeeder] Torrent already exists: ${existingTorrent.name} (${existingTorrent.infoHash})`
           );
-        });
+          return resolve({
+            message: "Torrent already being seeded",
+            torrent: {
+              name: existingTorrent.name,
+              infoHash: existingTorrent.infoHash,
+              magnetURI: existingTorrent.magnetURI,
+            },
+          });
+        }
+
+        // Sprawdzenie, czy parsedTorrent jest zdefiniowany przed próbą dostępu do właściwości
+        if (
+          !parsedTorrent ||
+          !parsedTorrent.length ||
+          !parsedTorrent.pieceLength
+        ) {
+          const errMsg = `[TorrentSeeder] Critical error: Torrent metadata is missing, invalid, or incomplete. Name: ${
+            parsedTorrent ? parsedTorrent.name : "N/A"
+          }, Length: ${
+            parsedTorrent ? parsedTorrent.length : "N/A"
+          }, PieceLength: ${parsedTorrent ? parsedTorrent.pieceLength : "N/A"}`;
+          console.error(errMsg);
+          return reject(new Error(errMsg));
+        }
+
+        // Utworz klasę magazynu specyficzną dla tego torrent
+        class TorrentSpecificStore extends PythonBlockchainChunkStore {
+          constructor(chunkLength, storeOpts) {
+            console.log(
+              `[TorrentSeeder] TorrentSpecificStore constructor called. chunkLength: ${chunkLength}`
+            );
+            console.log(`[TorrentSeeder] storeOpts:`, storeOpts);
+            // Przekaż parametry do nadklasy
+            super(imageId, parsedTorrent.length, chunkLength);
+            console.log(
+              `[TorrentSeeder] TorrentSpecificStore constructor completed for imageId: ${imageId}`
+            );
+          }
+        }
+
+        const options = {
+          name: parsedTorrent.name, // Nazwa torrenta
+          announce: parsedTorrent.announce, // Lista trackerów
+          store: TorrentSpecificStore, // Przekaż klasę bezpośrednio
+          // Nie podajemy `path`, ponieważ `store` obsługuje dostarczanie danych
+        };
+
         console.log(
-          `[TorrentSeeder] Torrent announce URLs: ${torrent.announce.join(
-            ", "
-          )}`
+          `[TorrentSeeder] Options for WebTorrent:`,
+          JSON.stringify(options, null, 2)
         );
-        console.log(`[TorrentSeeder] Torrent magnet URI: ${torrent.magnetURI}`);
-      });
-    } catch (error) {
-      console.error(
-        `[TorrentSeeder] Error seeding file from blockchain: ${error.message}`,
-        error
-      );
-      throw error; // Rzuć błąd dalej, aby obsłużyć go w routes.js
-    }
+
+        console.log(
+          `[TorrentSeeder] Adding torrent to client with TorrentSpecificStore for imageId: ${imageId}`
+        );
+
+        this.client.add(torrentFileBuffer, options, (torrent) => {
+          console.log(
+            `[TorrentSeeder] SUCCESS: Client is seeding (from blockchain) ${torrent.files.length} files for torrent: ${torrent.name} (infoHash: ${torrent.infoHash})`
+          );
+          console.log(`[TorrentSeeder] Files being seeded (metadata):`);
+          torrent.files.forEach((file) => {
+            console.log(
+              `  - ${file.name} (path in torrent: ${file.path}, length: ${file.length})`
+            );
+          });
+          console.log(
+            `[TorrentSeeder] Torrent announce URLs: ${torrent.announce.join(
+              ", "
+            )}`
+          );
+          console.log(
+            `[TorrentSeeder] Torrent magnet URI: ${torrent.magnetURI}`
+          );
+
+          resolve({
+            message: "Torrent successfully added and seeding started",
+            torrent: {
+              name: torrent.name,
+              infoHash: torrent.infoHash,
+              magnetURI: torrent.magnetURI,
+            },
+          });
+        });
+      } catch (error) {
+        console.error(
+          `[TorrentSeeder] Error seeding file from blockchain: ${error.message}`,
+          error
+        );
+        reject(error);
+      }
+    });
   }
 
   /**
